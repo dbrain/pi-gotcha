@@ -1,5 +1,6 @@
 import { MAX_SUMMARY, type Gotcha } from "./store.ts";
 import { prune } from "./rank.ts";
+import { jaccard } from "./text.ts";
 import { byId, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./runtime.ts";
 
 export const MIN_EVIDENCE = 15;
@@ -52,24 +53,6 @@ export const TOOL_DESCRIPTION =
 function describe(gotcha: Gotcha): string {
   const scope = gotcha.paths.length ? gotcha.paths.join(", ") : "project-wide";
   return `${gotcha.id} — ${gotcha.summary} [${scope}]`;
-}
-
-function tokens(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((word) => word.length > 2),
-  );
-}
-
-export function jaccard(a: string, b: string): number {
-  const left = tokens(a);
-  const right = tokens(b);
-  if (!left.size || !right.size) return 0;
-  let shared = 0;
-  for (const word of left) if (right.has(word)) shared += 1;
-  return shared / (left.size + right.size - shared);
 }
 
 async function findDuplicate(runtime: Runtime, summary: string, aliases: string[]): Promise<Gotcha | null> {

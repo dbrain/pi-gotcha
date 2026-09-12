@@ -34,6 +34,8 @@ Three channels with deliberately different scopes.
 
 **2. By relevance.** Project-wide gotchas can't be reached by touch, so they're ranked against the user's prompt at `before_agent_start`, then gated (below). Model prose and tool output are excluded from the query: they're long and drift toward what the agent just said rather than what it was asked.
 
+The gate alone is not enough on a small store. A ratio compares the best result against the best one that wouldn't have been shown anyway, so with fewer candidates than the cap there is no rival and a lone weak match passes trivially. With embeddings there is a floor to catch that; without them nothing measures meaning, so a pushed gotcha must additionally share at least one non-stopword with the prompt. Found by the wiring test: "rename the button label on the settings screen" was surfacing a gotcha about migrations.
+
 **3. By explicit search.** The tool's `search` action ranks everything and applies the relevance floor.
 
 Ranking is hybrid: MiniSearch (BM25, fuzzy, prefix) over summary, aliases, paths and body with summary and aliases boosted, plus cosine similarity over embeddings of `summary + aliases`. The two are combined by reciprocal rank fusion, `1/(60 + rank)`, because their scores are not on a common scale.
@@ -108,7 +110,7 @@ Deterministic checks first, model judgement second, human approval last:
 
 ## Testing
 
-- `npm test` — 94 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and both thresholds, every write guard, surfacing lifecycle, audit parsing and application.
+- `npm test` — 108 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and both thresholds, every write guard, surfacing lifecycle, audit parsing and application, and the extension wiring driven through a fake `pi` (touch a covered file, settle, assert one delivered line).
 - `npm run bench` — recall by query kind over the fixture corpus, with the misses printed by name. Add `PI_GOTCHA_EMBEDDINGS=local` to compare modes.
 - `npm run floors` — the recall-against-silence curve behind the default floor.
 

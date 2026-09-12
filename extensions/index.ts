@@ -5,6 +5,7 @@ import { matching, pathsIn, projectWide } from "./lib/paths.ts";
 import { gate } from "./lib/rank.ts";
 import { byId, createRuntime, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./lib/runtime.ts";
 import { loadSettings } from "./lib/settings.ts";
+import { overlaps } from "./lib/text.ts";
 import { runGotchaTool, TOOL_DESCRIPTION, TOOL_PARAMETERS } from "./lib/tool.ts";
 
 function deliver(pi: any, content: string): void {
@@ -61,7 +62,17 @@ export default function (pi: any): void {
     if (!decision.surfaced.length) return;
 
     const index = byId(wide);
-    active.surfacer.stage(decision.surfaced.map((entry) => index.get(entry.id)!).filter(Boolean));
+    const chosen = decision.surfaced
+      .map((entry) => index.get(entry.id))
+      .filter((gotcha): gotcha is NonNullable<typeof gotcha> => Boolean(gotcha))
+      // A lone candidate stands out from nothing, so the ratio alone would push it. Without
+      // embeddings nothing measures meaning, so require at least one shared word before
+      // spending context on something the user did not ask for.
+      .filter(
+        (gotcha) =>
+          active.semantic.ready || overlaps(prompt, `${gotcha.summary} ${gotcha.aliases.join(" ")}`),
+      );
+    if (chosen.length) active.surfacer.stage(chosen);
   });
 
   pi.on("agent_settled", (_event: unknown, ctx: any) => {

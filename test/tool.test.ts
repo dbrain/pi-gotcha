@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
-import { jaccard, runGotchaTool } from "../extensions/lib/tool.ts";
+import { runGotchaTool } from "../extensions/lib/tool.ts";
+import { jaccard, overlaps, tokens } from "../extensions/lib/text.ts";
 import { cleanup, runtimeFor, SAMPLE, tempRoot } from "./helpers.ts";
 
 const roots: string[] = [];
@@ -25,7 +26,14 @@ describe("jaccard", () => {
   test("identical text scores 1", () => assert.equal(jaccard("alpha beta gamma", "alpha beta gamma"), 1));
   test("disjoint text scores 0", () => assert.equal(jaccard("alpha beta", "gamma delta"), 0));
   test("words of two characters or fewer are ignored", () => assert.equal(jaccard("a an of", "a an of"), 0));
+  test("stopwords are ignored", () => assert.equal(jaccard("the and that", "the and that"), 0));
   test("shared wording drives the score", () => assert.ok(jaccard("invoice cents comma", "invoice cents export") > 0.3));
+  test("tokens drops stopwords and short words", () =>
+    assert.deepEqual([...tokens("the invoice is a total")], ["invoice", "total"]));
+  test("overlaps is true on one shared real word", () =>
+    assert.equal(overlaps("rename the button", "the button label"), true));
+  test("overlaps is false when only stopwords are shared", () =>
+    assert.equal(overlaps("rename the screen", "the deploy migrations"), false));
 });
 
 describe("add guards", () => {

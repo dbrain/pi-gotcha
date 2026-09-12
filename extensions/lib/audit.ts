@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { staleScopes } from "./paths.ts";
-import { jaccard } from "./tool.ts";
+import { jaccard } from "./text.ts";
 import type { Gotcha, GotchaStore } from "./store.ts";
 
 export interface AuditReport {
