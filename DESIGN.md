@@ -93,6 +93,8 @@ The write desk is where memory systems fail, so every guard here is deterministi
 | `list` capped | `listLimit` (30), with a count of what it left out |
 | Body capped | `maxBodyChars` (8000) on add and update: record the constraint and the values that matter, and point at the file or commit rather than pasting output |
 
+A guard only helps if the model knows the contract. Under a realistic session prompt — a full tool list, and the work phrased the way someone actually says it — a 12B filled `expected`, silently omitted `actual`, and lost two of three genuine gotchas to the evidence guard. Only `action` is schema-required, so the description now names the whole set an `add` needs and both evidence fields say `REQUIRED`. That moved stored gotchas from 1/3 to 3/3 with junk still refused 2/2, and it removed junk attempts rather than adding them: spelling out the evidence pair makes trivia visibly unfillable.
+
 `read` is the only channel that returns a body, and it returns `readChunk` (2000) characters at a time with an offset to continue, so one heavy gotcha cannot flood a session. Continuing is not counted as a second opening.
 
 ## Review and proposals

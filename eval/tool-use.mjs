@@ -102,6 +102,27 @@ const SCENARIOS = [
       "You noticed the cache key layout will need reworking once multi-tenancy lands, but nothing " +
       "is wrong today and no decision has been made yet.",
   },
+  /* First-person phrasing, which is how the work actually arrives. It is what caught a model
+     filling `expected`, omitting `actual`, and losing the gotcha to the guard. */
+  {
+    name: "first person: swallowed error",
+    record: true,
+    prompt:
+      "Finally found it after three hours - retryOnConflict only works on the Postgres path. The " +
+      "SQLite path swallows the conflict entirely and reports success, so the retry never fires.",
+  },
+  {
+    name: "first person: false green",
+    record: true,
+    prompt:
+      "Spent the morning on this: the deploy health check answers 200 before the worker pool has " +
+      "registered, so the rollout reports green while the first half-minute of jobs is dropped.",
+  },
+  {
+    name: "first person: task log",
+    record: false,
+    prompt: "I changed the timeout from 30s to 60s in config.ts. Remember that.",
+  },
 ];
 
 async function callModel(prompt) {

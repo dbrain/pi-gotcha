@@ -139,7 +139,7 @@ The honest evidence comes from pi-canon's benchmarks: of 14 recall failures, 13 
 
 What a model gets wrong is not malice but calibration: asked to record what's important, it records what it just did. The countermeasures here are deterministic, not prompt-based:
 
-- **Required `expected` and `actual` fields.** Recording trivia becomes awkward, because there is nothing to put in them.
+- **Required `expected` and `actual` fields.** Recording trivia becomes awkward, because there is nothing to put in them. The description names the full set an `add` needs, because a model that fills `expected` and forgets `actual` loses the gotcha to this guard: naming them took stored gotchas from 1/3 to 3/3 under a realistic session prompt, junk still refused.
 - **Wording-based refusal.** Stated preferences, "I changed X to Y", TODOs and reminders are rejected outright.
 - **A vagueness floor.** "Cache behaves oddly" is refused: too vague to ever find again.
 - **Worked examples in the tool description.** A small model copies a shown pattern far more reliably than it follows a stated rule.

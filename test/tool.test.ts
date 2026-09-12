@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
-import { runGotchaTool } from "../extensions/lib/tool.ts";
+import { runGotchaTool, TOOL_DESCRIPTION, TOOL_PARAMETERS } from "../extensions/lib/tool.ts";
 import { jaccard, overlaps, tokens } from "../extensions/lib/text.ts";
 import { cleanup, idFromResult, runtimeFor, SAMPLE, tempRoot } from "./helpers.ts";
 import type { Settings } from "../extensions/lib/settings.ts";
@@ -60,6 +60,21 @@ describe("what counts as a gotcha", () => {
     assert.match((await runGotchaTool(active, { ...ADD, actual: "broke" })).text, /needs both/);
     assert.match((await runGotchaTool(active, { ...ADD, expected: "" })).text, /needs both/);
     assert.equal(active.store.list().length, 0);
+  });
+
+  /* A 12B in a realistic session filled `expected` and silently omitted `actual`, losing two of
+     three genuine gotchas to the guard above. Only `action` is schema-required, so the contract
+     has to say out loud what an add needs. */
+  test("the contract names every field an add requires", () => {
+    assert.match(TOOL_DESCRIPTION, /add requires/i);
+    for (const field of ["summary", "expected", "actual", "trigger", "aliases"]) {
+      assert.ok(
+        new RegExp(`add requires[^.]*\\b${field}\\b`, "i").test(TOOL_DESCRIPTION),
+        `TOOL_DESCRIPTION never names ${field} among the fields an add requires`,
+      );
+    }
+    assert.match(TOOL_PARAMETERS.properties.expected.description, /REQUIRED/);
+    assert.match(TOOL_PARAMETERS.properties.actual.description, /REQUIRED/);
   });
 
   const junk: Array<[string, string]> = [

@@ -16,11 +16,11 @@ export const TOOL_PARAMETERS = {
     },
     expected: {
       type: "string",
-      description: "add, update: what you expected to happen, or what the code looks like it does.",
+      description: "add, update: REQUIRED. What you expected to happen, or what the code looks like it does.",
     },
     actual: {
       type: "string",
-      description: "add, update: what actually happened, and how you found out.",
+      description: "add, update: REQUIRED. What actually happened, and how you found out. Never omit this.",
     },
     trigger: {
       type: "string",
@@ -71,7 +71,10 @@ export const TOOL_DESCRIPTION =
   'you), "the user prefers tabs" (a preference), "TODO: revisit the cache key" (a plan), ' +
   '"getUser returns null when the id is unknown" (the code says so). ' +
   "If the knowledge belongs at one line of code, write a comment there instead. " +
-  "Prefer update over add: a near-duplicate is refused, and updating costs nothing.";
+  "Prefer update over add: a near-duplicate is refused, and updating costs nothing." +
+  "\n\nadd requires ALL of: summary, expected, actual, trigger, and at least two aliases. " +
+  "An add missing `actual` is refused and the knowledge is lost, so write both halves of the " +
+  "evidence pair before you call.";
 
 /* Every pattern here has to name a person doing the preferring, planning or doing. Matching the
    bare verbs rejected real findings: a live 12B wrote "rows with commas (like formatted
