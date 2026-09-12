@@ -111,7 +111,7 @@ What a model gets wrong is not malice but calibration: asked to record what's im
 - **Required `expected` and `actual` fields.** Recording trivia becomes awkward, because there is nothing to put in them.
 - **Wording-based refusal.** Stated preferences, "I changed X to Y", TODOs and reminders are rejected outright.
 - **A duplicate check on write** returns the existing gotcha instead of filing a near-copy.
-- **A budget of 5 new gotchas per day**, counted in the store, so it holds across sessions and across the separate processes background subagents run in.
+- **A budget of 5 new gotchas per day**, counted in the store, so it holds across sessions and across the separate processes background subagents run in. Updating an existing gotcha is unlimited and never spends budget. When the budget runs out the tool asks you to approve the next one, and approvals are counted so a hot day is visible later; a background subagent has nobody to ask and is simply refused. For a day of deep work, `/gotchas-budget 20` raises it in one go.
 - **At least two aliases**, because a gotcha nobody can find again is only cost.
 - **Usage counts.** Every surfaced line and every read is recorded, so `/gotchas-review` can show what surfaces constantly and is never opened — the signature of noise — and the audit packet makes the model judge against that rather than vibes.
 - **`/gotchas-review` and `/gotchas-apply`** let a human clear out junk in seconds, and `.gotchas/` shows up in code review like any other file.

@@ -82,7 +82,7 @@ The write desk is where memory systems fail, so every guard here is deterministi
 | At least 2 aliases | Retrieval leans on them; without them the gotcha will not be found again |
 | Summary ≤ 200 characters | Keeps the surfaced line one line |
 | Duplicate check | Token overlap ≥ `duplicateOverlap`, or cosine ≥ `duplicateThreshold`, returns the existing gotcha |
-| Daily write budget | `dailyWriteCap` (5) across every session and subagent, counted in the store, not in memory |
+| Daily write budget | `dailyWriteCap` (5) across every session and subagent, counted in the store, not in memory. `update` is exempt: refining an existing gotcha is unlimited. Over budget, the tool asks the user through `ctx.ui.confirm` and counts approvals; with no UI — a background subagent — it is refused. `/gotchas-budget <n>` raises the allowance for today only |
 | Reason required to retire | Logged to `.cache/retired.log`; git keeps the file |
 | `list` capped | `listLimit` (30), with a count of what it left out |
 
@@ -104,6 +104,7 @@ Usage counts are what make this evidence-based: surfaced many times and never op
 ```json
 {
   "surface": true,
+  "overBudgetPrompt": true,
   "maxSurfacedPerTurn": 2,
   "maxPathSurfacedPerTurn": 3,
   "standout": 1.4,

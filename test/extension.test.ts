@@ -84,7 +84,10 @@ describe("extension wiring", () => {
     const pi = fakePi();
     register(pi as any);
     assert.ok(pi.tools.has("gotcha"));
-    assert.deepEqual([...pi.commands.keys()].sort(), ["gotchas", "gotchas-apply", "gotchas-audit", "gotchas-review"]);
+    assert.deepEqual(
+      [...pi.commands.keys()].sort(),
+      ["gotchas", "gotchas-apply", "gotchas-audit", "gotchas-budget", "gotchas-review"],
+    );
   });
 
   test("touching a covered file delivers its line once the turn settles", async () => {

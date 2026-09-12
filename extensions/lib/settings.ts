@@ -6,6 +6,7 @@ export type EmbeddingProvider = "auto" | "local" | "remote" | "off";
 
 export interface Settings {
   surface: boolean;
+  overBudgetPrompt: boolean;
   maxSurfacedPerTurn: number;
   maxPathSurfacedPerTurn: number;
   standout: number;
@@ -27,6 +28,7 @@ export interface Settings {
 
 export const DEFAULTS: Settings = {
   surface: true,
+  overBudgetPrompt: true,
   maxSurfacedPerTurn: 2,
   maxPathSurfacedPerTurn: 3,
   standout: 1.4,
@@ -72,6 +74,7 @@ function coerce(raw: unknown): Partial<Settings> {
   const source = raw as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   if (typeof source.surface === "boolean") out.surface = source.surface;
+  if (typeof source.overBudgetPrompt === "boolean") out.overBudgetPrompt = source.overBudgetPrompt;
   for (const key of NUMERIC) if (Number.isFinite(source[key])) out[key] = Number(source[key]);
   if (source.embeddings && typeof source.embeddings === "object") {
     const embeddings = source.embeddings as Record<string, unknown>;

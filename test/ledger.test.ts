@@ -42,6 +42,32 @@ describe("write budget", () => {
   });
 });
 
+describe("today's allowance", () => {
+  test("falls back to the configured cap", () => {
+    assert.equal(new Ledger(store()).capToday(5), 5);
+  });
+
+  test("a raised budget wins for the day", () => {
+    const shared = store();
+    new Ledger(shared).raiseToday(20);
+    assert.equal(new Ledger(shared).capToday(5), 20);
+  });
+
+  test("a budget of zero is honoured rather than treated as unset", () => {
+    const ledger = new Ledger(store());
+    ledger.raiseToday(0);
+    assert.equal(ledger.capToday(5), 0);
+  });
+
+  test("approved over-budget writes are counted", () => {
+    const ledger = new Ledger(store());
+    assert.equal(ledger.overridesToday(), 0);
+    ledger.recordOverride();
+    ledger.recordOverride();
+    assert.equal(ledger.overridesToday(), 2);
+  });
+});
+
 describe("usage", () => {
   test("records surfaced and read counts", () => {
     const ledger = new Ledger(store());

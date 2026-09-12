@@ -91,7 +91,11 @@ export default function (pi: any): void {
     description: TOOL_DESCRIPTION,
     parameters: TOOL_PARAMETERS,
     async execute(_toolCallId: string, params: Record<string, unknown>, _signal: unknown, _onUpdate: unknown, ctx: any) {
-      const result = await runGotchaTool(ready(ctx), params);
+      const ask =
+        typeof ctx?.ui?.confirm === "function"
+          ? (question: string, detail: string) => ctx.ui.confirm(question, detail)
+          : undefined;
+      const result = await runGotchaTool(ready(ctx), params, { ask });
       return { content: [{ type: "text", text: result.text }], details: {} };
     },
   });
@@ -108,14 +112,40 @@ export default function (pi: any): void {
       const semantic = active.semantic.ready
         ? "meaning-based search ready"
         : `keyword only${active.semantic.failure ? `: ${active.semantic.failure}` : ""}`;
+      const overrides = active.ledger.overridesToday();
       ctx.ui.notify(
         [
           `${all.length} gotchas in ${active.store.dir} (${semantic})`,
-          `Recorded today: ${active.ledger.writesToday()} of ${active.settings.dailyWriteCap}`,
+          `Recorded today: ${active.ledger.writesToday()} of ${active.ledger.capToday(active.settings.dailyWriteCap)}` +
+            (overrides ? ` (${overrides} approved over budget)` : ""),
           `Surfaced this session: ${active.surfacer.seenCount()}`,
         ].join("\n"),
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("gotchas-budget", {
+    description: "Show or raise today's gotcha write budget",
+    handler: async (args: string, ctx: any) => {
+      const active = ready(ctx);
+      const used = active.ledger.writesToday();
+      const wanted = args.trim();
+      if (!wanted) {
+        ctx.ui.notify(
+          `Recorded ${used} of ${active.ledger.capToday(active.settings.dailyWriteCap)} today. ` +
+            "Raise it with /gotchas-budget <n>; updating existing gotchas is always unlimited.",
+          "info",
+        );
+        return;
+      }
+      const cap = Number(wanted);
+      if (!Number.isFinite(cap) || cap < 0) {
+        ctx.ui.notify("Usage: /gotchas-budget <number>", "warning");
+        return;
+      }
+      active.ledger.raiseToday(Math.floor(cap));
+      ctx.ui.notify(`Today's budget is now ${Math.floor(cap)}; ${used} already recorded.`, "info");
     },
   });
 

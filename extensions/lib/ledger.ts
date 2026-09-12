@@ -10,6 +10,8 @@ export interface Usage {
 
 interface LedgerFile {
   writes: Record<string, number>;
+  allowance: Record<string, number>;
+  overrides: Record<string, number>;
   usage: Record<string, Usage>;
 }
 
@@ -40,19 +42,26 @@ export class Ledger {
     if (existsSync(path)) {
       try {
         const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<LedgerFile>;
-        this.cache = { writes: parsed.writes ?? {}, usage: parsed.usage ?? {} };
+        this.cache = {
+          writes: parsed.writes ?? {},
+          allowance: parsed.allowance ?? {},
+          overrides: parsed.overrides ?? {},
+          usage: parsed.usage ?? {},
+        };
         return this.cache;
       } catch {
         /* a corrupt ledger costs counters, never the store */
       }
     }
-    this.cache = { writes: {}, usage: {} };
+    this.cache = { writes: {}, allowance: {}, overrides: {}, usage: {} };
     return this.cache;
   }
 
   private save(data: LedgerFile): void {
     const cutoff = new Date(Date.now() - KEEP_DAYS * 86_400_000).toISOString().slice(0, 10);
     for (const day of Object.keys(data.writes)) if (day < cutoff) delete data.writes[day];
+    for (const day of Object.keys(data.allowance)) if (day < cutoff) delete data.allowance[day];
+    for (const day of Object.keys(data.overrides)) if (day < cutoff) delete data.overrides[day];
     this.cache = data;
     writeFileSync(this.path(), JSON.stringify(data));
   }
@@ -65,6 +74,28 @@ export class Ledger {
     const data = this.load();
     data.writes[today()] = (data.writes[today()] ?? 0) + 1;
     this.save(data);
+  }
+
+  // A day of deep work can genuinely produce more findings than the standing budget, so the
+  // budget is raisable for that day rather than something to argue with on every write.
+  capToday(fallback: number): number {
+    return this.load().allowance[today()] ?? fallback;
+  }
+
+  raiseToday(cap: number): void {
+    const data = this.load();
+    data.allowance[today()] = cap;
+    this.save(data);
+  }
+
+  recordOverride(): void {
+    const data = this.load();
+    data.overrides[today()] = (data.overrides[today()] ?? 0) + 1;
+    this.save(data);
+  }
+
+  overridesToday(): number {
+    return this.load().overrides[today()] ?? 0;
   }
 
   usage(id: string): Usage {

@@ -101,6 +101,12 @@ export interface ToolResult {
   text: string;
 }
 
+export interface ToolContext {
+  // Present only where there is a human to ask: a background subagent gets no prompt, and so
+  // cannot spend budget the user did not approve.
+  ask?: (question: string, detail: string) => Promise<boolean>;
+}
+
 function refuseJunk(summary: string): string | null {
   for (const { pattern, why } of NOT_A_GOTCHA) {
     if (pattern.test(summary)) {
@@ -110,7 +116,11 @@ function refuseJunk(summary: string): string | null {
   return null;
 }
 
-export async function runGotchaTool(runtime: Runtime, params: Record<string, unknown>): Promise<ToolResult> {
+export async function runGotchaTool(
+  runtime: Runtime,
+  params: Record<string, unknown>,
+  context: ToolContext = {},
+): Promise<ToolResult> {
   const action = String(params.action ?? "");
   const { store, ledger, settings } = runtime;
 
@@ -194,13 +204,21 @@ export async function runGotchaTool(runtime: Runtime, params: Record<string, unk
     }
 
     const written = ledger.writesToday();
-    if (written >= settings.dailyWriteCap) {
-      return {
-        text:
-          `${written} gotchas were already recorded today, which is the cap across all sessions ` +
-          "and subagents. Update an existing one instead, or keep this for a day where it is the " +
-          "main finding.",
-      };
+    const cap = ledger.capToday(settings.dailyWriteCap);
+    if (written >= cap) {
+      const approved =
+        settings.overBudgetPrompt && context.ask
+          ? await context.ask(`Record a ${written + 1}th gotcha today? The budget is ${cap}.`, summary)
+          : false;
+      if (!approved) {
+        return {
+          text:
+            `${written} gotchas were already recorded today, which is the budget across all ` +
+            "sessions and subagents. Updating an existing gotcha is always allowed and does not " +
+            "spend budget, so prefer that. The user can raise today's budget with /gotchas-budget.",
+        };
+      }
+      ledger.recordOverride();
     }
 
     const duplicate = await findDuplicate(runtime, summary, aliases);
@@ -215,8 +233,12 @@ export async function runGotchaTool(runtime: Runtime, params: Record<string, unk
     const created = store.add({ summary, expected, actual, paths, aliases, body: String(params.body ?? "") });
     ledger.recordWrite();
     void refreshSemantic(runtime);
-    const remaining = settings.dailyWriteCap - written - 1;
-    return { text: `Recorded ${created.id}. ${remaining} more can be recorded today.` };
+    const remaining = Math.max(0, cap - written - 1);
+    return {
+      text:
+        `Recorded ${created.id}. ${remaining} more can be recorded today; updating existing ` +
+        "gotchas is unlimited.",
+    };
   }
 
   if (action === "update") {

@@ -50,6 +50,11 @@ describe("loadSettings", () => {
     assert.equal(loadSettings(project({ surface: false })).surface, false);
   });
 
+  test("over-budget prompting can be turned off", () => {
+    assert.equal(loadSettings(project({ overBudgetPrompt: false })).overBudgetPrompt, false);
+    assert.equal(loadSettings(project()).overBudgetPrompt, true);
+  });
+
   test("embedding settings merge rather than replace wholesale", () => {
     const settings = loadSettings(project({ embeddings: { provider: "off" } }), userFile({}));
     assert.equal(settings.embeddings.provider, "off");
