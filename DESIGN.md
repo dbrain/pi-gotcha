@@ -52,6 +52,8 @@ A ratio can't discriminate on a store too small to have rivals, so an unsolicite
 
 Optional, lazily imported, never a declared dependency: transformers.js pulls onnxruntime and sharp, about 300 MB.
 
+Being optional means it will not be beside us. A host installs extensions from npm under one tree and from git under another, and Node resolves a bare specifier by walking up from the importing file, so a git-installed copy of this package cannot see anything installed into the npm tree. The import therefore tries the bare specifier first and then looks for the runtime under `$PI_CODING_AGENT_DIR` and `~/.pi/agent` — `npm/` first, then the directory itself — reading the package's own manifest to find its entry point. Without that, `provider: "local"` degrades to keyword-only silently, which costs the paraphrase recall the trigger field was added to win.
+
 - **local** — `all-MiniLM-L6-v2`, quantized, on the CPU.
 - **remote** — any OpenAI-compatible `/v1/embeddings` endpoint.
 - **off** — keyword only.

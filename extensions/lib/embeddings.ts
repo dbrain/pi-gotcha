@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Scored } from "./lexical.ts";
 import type { Settings } from "./settings.ts";
 import type { Gotcha, GotchaStore } from "./store.ts";
@@ -31,8 +33,60 @@ export function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+function pickEntry(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return null;
+  const conditions = value as Record<string, unknown>;
+  for (const key of ["import", "node", "default", "module", "require"]) {
+    const found = pickEntry(conditions[key]);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function entryPointIn(root: string, pkg = LOCAL_PACKAGE): string | null {
+  const dir = join(root, "node_modules", pkg);
+  const manifest = join(dir, "package.json");
+  if (!existsSync(manifest)) return null;
+  try {
+    const json = JSON.parse(readFileSync(manifest, "utf8")) as Record<string, any>;
+    const entry = pickEntry(json.exports?.["."] ?? json.exports) ?? json.module ?? json.main;
+    if (typeof entry !== "string") return null;
+    const file = join(dir, entry);
+    return existsSync(file) ? file : null;
+  } catch {
+    return null;
+  }
+}
+
+/* Pi installs packages from git under <agent>/git/... and from npm under <agent>/npm/node_modules,
+   and Node resolves a bare specifier by walking up from the importing file. A git-installed
+   extension therefore cannot see anything in the npm tree, which is where the optional embedding
+   runtime gets installed. Rather than depend on where the host put us, look for it. */
+export function embeddingRuntimeRoots(): string[] {
+  const bases = [process.env.PI_CODING_AGENT_DIR, join(homedir(), ".pi", "agent")].filter(
+    (base): base is string => Boolean(base),
+  );
+  return bases.flatMap((base) => [join(base, "npm"), base]);
+}
+
+async function importEmbeddingRuntime(): Promise<any> {
+  try {
+    return await import(LOCAL_PACKAGE);
+  } catch {
+    for (const root of embeddingRuntimeRoots()) {
+      const entry = entryPointIn(root);
+      if (entry) return await import(pathToFileURL(entry).href);
+    }
+    throw new Error(
+      `${LOCAL_PACKAGE} is not installed. Install it into pi's own tree with: ` +
+        `npm install --prefix ~/.pi/agent/npm --ignore-scripts ${LOCAL_PACKAGE}`,
+    );
+  }
+}
+
 export async function localEmbedder(model: string): Promise<Embedder> {
-  const { pipeline } = (await import(LOCAL_PACKAGE)) as any;
+  const { pipeline } = (await importEmbeddingRuntime()) as any;
   const extract = await pipeline("feature-extraction", model, { dtype: "q8" });
   return {
     id: `local:${model}`,
