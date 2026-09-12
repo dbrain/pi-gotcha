@@ -1,0 +1,34 @@
+{
+  "name": "pi-gotcha",
+  "version": "0.1.0",
+  "description": "Hard-won project knowledge for the Pi coding agent: recorded once, surfaced when it matters",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "memory",
+    "gotchas"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "dependencies": {
+    "minisearch": "^7.2.0",
+    "yaml": "^2.9.1"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'",
+    "bench": "node --test test/retrieval.bench.ts",
+    "floors": "node --test test/floor.bench.ts"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "^4.2.0"
+  }
+}
