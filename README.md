@@ -53,6 +53,8 @@ One gotcha is one markdown file in `<project>/.gotchas/`:
 summary: Invoice totals are integer cents; the finance CSV parser drops any line with a comma
 paths: [src/billing/, src/export/csv.ts]
 aliases: [money formatting, currency, amounts, thousands separator]
+expected: The export to contain the formatted total like every other column
+actual: The row vanished with no error; the parser treats a comma as corruption
 created: 2026-09-12
 ---
 
@@ -60,8 +62,9 @@ created: 2026-09-12
 ```
 
 - `summary` is the single line that gets surfaced. Everything else is read on demand.
-- `paths` is what the gotcha covers: files, directory prefixes, or empty for project-wide.
-- `aliases` are the other words someone might search for. The agent writes these once, at record time, and they're what makes retrieval work later.
+- `paths` is what the gotcha covers: files, directory prefixes, or empty for project-wide. Repo-wide knowledge is fine — scoping something at the repo root moves it to the relevance channel rather than surfacing it on every file you touch.
+- `aliases` are the other words someone might search for, written once at record time.
+- `expected` and `actual` are the bar for recording anything at all. A preference or a note about what you just did has nothing to put in them.
 
 One file per gotcha, so two devices adding gotchas produce no merge conflict.
 
@@ -72,7 +75,7 @@ Two channels, neither of which needs the agent to remember to ask:
 1. **By path.** A tool call touches `src/billing/invoice.ts`, and any gotcha covering that file or a parent directory surfaces its summary at the end of the turn. Deterministic: a path lookup, no ranking.
 2. **By relevance.** Gotchas with no path (project-wide) are ranked against what the agent is actually doing, and only clear winners surface. This is what keeps "ideally only if relevant" honest.
 
-Both deliver at most a couple of lines per turn, each gotcha at most once per session, appended as a message so the cached prompt prefix stays intact.
+Both are capped — 3 lines from paths, 2 from relevance, the most specific scope first — each gotcha at most once per session, appended as a message so the cached prompt prefix stays intact. Only a tool call's addressing is scanned, never the file contents it carries, so a path mentioned inside a diff is not treated as a visit.
 
 The agent can also search explicitly, which is the only channel that returns full text.
 
@@ -105,9 +108,12 @@ The honest evidence comes from pi-canon's benchmarks: of 14 recall failures, 13 
 
 What a model gets wrong is not malice but calibration: asked to record what's important, it records what it just did. The countermeasures here are deterministic, not prompt-based:
 
+- **Required `expected` and `actual` fields.** Recording trivia becomes awkward, because there is nothing to put in them.
+- **Wording-based refusal.** Stated preferences, "I changed X to Y", TODOs and reminders are rejected outright.
 - **A duplicate check on write** returns the existing gotcha instead of filing a near-copy.
-- **A cap of 3 new gotchas per session** forces selection rather than logging.
-- **A required `evidence` field** ("what did you expect, what actually happened") makes recording a trivial observation feel wrong, because there's nothing to put there.
-- **`/gotchas-review`** lists recent additions so a human can delete the junk in seconds, and `.gotchas/` shows up in code review like any other file.
+- **A budget of 5 new gotchas per day**, counted in the store, so it holds across sessions and across the separate processes background subagents run in.
+- **At least two aliases**, because a gotcha nobody can find again is only cost.
+- **Usage counts.** Every surfaced line and every read is recorded, so `/gotchas-review` can show what surfaces constantly and is never opened — the signature of noise — and the audit packet makes the model judge against that rather than vibes.
+- **`/gotchas-review` and `/gotchas-apply`** let a human clear out junk in seconds, and `.gotchas/` shows up in code review like any other file.
 
 So: not a manual task, but not unsupervised either. The agent drafts, deterministic rules block the obvious failure modes, and you skim the diff. If after a month the notes are mostly noise, the fallback is the current arrangement, a hand-written `## Gotchas` section in `AGENTS.md`, and nothing is lost but the extension.

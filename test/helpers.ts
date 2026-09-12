@@ -34,8 +34,13 @@ export function runtimeFor(root: string, overrides: Partial<Settings> = {}): Run
 
 export const SAMPLE: GotchaDraft = {
   summary: "Invoice totals are integer cents; the CSV export drops any line containing a comma",
-  evidence: "Expected 2,255.65 in the export, got a missing row; the finance parser treats commas as corruption",
+  expected: "The export to contain the formatted total 2,255.65 like every other column",
+  actual: "The row vanished with no error; the finance parser treats a comma as corruption",
   paths: ["src/billing/", "src/export/csv.ts"],
   aliases: ["money formatting", "currency", "thousands separator"],
   body: "Invoice.total is an integer count of cents below the API boundary.",
 };
+
+export function idFromResult(text: string): string {
+  return text.replace("Recorded ", "").split(".")[0].trim();
+}

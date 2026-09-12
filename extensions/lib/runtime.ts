@@ -1,13 +1,10 @@
 import { SemanticIndex } from "./embeddings.ts";
+import { Ledger } from "./ledger.ts";
 import { LexicalIndex, type Scored } from "./lexical.ts";
 import { fuse, type Ranked } from "./rank.ts";
-import type { Settings } from "./settings.ts";
+import { loadSettings, type Settings } from "./settings.ts";
 import { GotchaStore, type Gotcha } from "./store.ts";
 import { Surfacer } from "./surfacing.ts";
-
-export interface SessionState {
-  writes: number;
-}
 
 export interface Runtime {
   root: string;
@@ -16,10 +13,10 @@ export interface Runtime {
   lexical: LexicalIndex;
   semantic: SemanticIndex;
   surfacer: Surfacer;
-  session: SessionState;
+  ledger: Ledger;
 }
 
-export function createRuntime(root: string, settings: Settings): Runtime {
+export function createRuntime(root: string, settings = loadSettings(root)): Runtime {
   const store = new GotchaStore(root);
   return {
     root,
@@ -28,7 +25,7 @@ export function createRuntime(root: string, settings: Settings): Runtime {
     lexical: new LexicalIndex(),
     semantic: new SemanticIndex(store, settings),
     surfacer: new Surfacer(),
-    session: { writes: 0 },
+    ledger: new Ledger(store),
   };
 }
 
@@ -42,9 +39,23 @@ export function refreshSemantic(runtime: Runtime): Promise<void> {
   return runtime.semantic.refresh(runtime.store.list());
 }
 
+const warming = new WeakSet<Runtime>();
+
+/* The embedding model costs ~100MB resident and seconds of startup in every process that
+   loads it, background subagent runners included, so it is loaded on the first query that
+   could use it rather than at session start. That query itself runs keyword-only; by the
+   next one the index is warm. */
+function warm(runtime: Runtime): void {
+  if (runtime.settings.embeddings.provider === "off") return;
+  if (runtime.semantic.ready || warming.has(runtime)) return;
+  warming.add(runtime);
+  void refreshSemantic(runtime).finally(() => warming.delete(runtime));
+}
+
 export async function hybridSearch(runtime: Runtime, query: string, limit = 10): Promise<Ranked[]> {
   const all = gotchas(runtime);
   if (!all.length || !query.trim()) return [];
+  warm(runtime);
   const lexical: Scored[] = runtime.lexical.search(query, limit * 2);
   const semantic: Scored[] = await runtime.semantic.search(query, limit * 2);
   return fuse([lexical, semantic], limit);

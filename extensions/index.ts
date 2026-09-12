@@ -1,10 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { applyProposals, audit, auditPacket, parseProposals, renderReport } from "./lib/audit.ts";
 import { matching, pathsIn, projectWide } from "./lib/paths.ts";
 import { gate } from "./lib/rank.ts";
 import { byId, createRuntime, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./lib/runtime.ts";
-import { loadSettings } from "./lib/settings.ts";
 import { overlaps } from "./lib/text.ts";
 import { runGotchaTool, TOOL_DESCRIPTION, TOOL_PARAMETERS } from "./lib/tool.ts";
 
@@ -16,35 +15,34 @@ function deliver(pi: any, content: string): void {
   }
 }
 
+function newestPacket(dir: string): string | null {
+  if (!existsSync(dir)) return null;
+  const packets = readdirSync(dir)
+    .filter((name) => name.startsWith("audit-") && name.endsWith(".md"))
+    .sort();
+  return packets.length ? join(dir, packets[packets.length - 1]) : null;
+}
+
 export default function (pi: any): void {
-  const settings = loadSettings();
   let runtime: Runtime | null = null;
 
   const ready = (ctx: any): Runtime => {
     const root: string = ctx?.cwd ?? process.cwd();
-    if (!runtime || runtime.root !== root) runtime = createRuntime(root, settings);
+    if (!runtime || runtime.root !== root) runtime = createRuntime(root);
     return runtime;
   };
 
-  pi.on("session_start", async (_event: unknown, ctx: any) => {
-    const active = ready(ctx);
-    if (!active.store.exists()) return;
-    gotchas(active);
-    void refreshSemantic(active);
-  });
-
   pi.on("tool_call", (event: any, ctx: any) => {
-    if (!settings.surface) return;
     const active = ready(ctx);
-    if (!active.store.exists()) return;
+    if (!active.settings.surface || !active.store.exists()) return;
     const touched = pathsIn(event?.input, active.root);
     if (!touched.length) return;
-    active.surfacer.stage(matching(gotchas(active), touched));
+    active.surfacer.stage(matching(gotchas(active), touched, active.settings.maxPathSurfacedPerTurn));
   });
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
-    if (!settings.surface || settings.maxSurfacedPerTurn === 0) return;
     const active = ready(ctx);
+    if (!active.settings.surface || active.settings.maxSurfacedPerTurn === 0) return;
     if (!active.store.exists()) return;
     const prompt = String(event?.prompt ?? "").trim();
     if (!prompt) return;
@@ -55,9 +53,9 @@ export default function (pi: any): void {
     const allowed = new Set(wide.map((gotcha) => gotcha.id));
     const ranked = (await hybridSearch(active, prompt, 10)).filter((entry) => allowed.has(entry.id));
     const decision = gate(ranked, {
-      standout: settings.standout,
-      semanticFloor: settings.semanticFloor,
-      cap: settings.maxSurfacedPerTurn,
+      standout: active.settings.standout,
+      semanticFloor: active.settings.semanticFloor,
+      cap: active.settings.maxSurfacedPerTurn,
     });
     if (!decision.surfaced.length) return;
 
@@ -77,8 +75,10 @@ export default function (pi: any): void {
 
   pi.on("agent_settled", (_event: unknown, ctx: any) => {
     const active = ready(ctx);
-    const text = active.surfacer.flush();
-    if (text) deliver(pi, text);
+    const flushed = active.surfacer.flush();
+    if (!flushed) return;
+    active.ledger.recordSurfaced(flushed.ids);
+    deliver(pi, flushed.text);
   });
 
   pi.on("session_compact", (_event: unknown, ctx: any) => {
@@ -109,17 +109,21 @@ export default function (pi: any): void {
         ? "meaning-based search ready"
         : `keyword only${active.semantic.failure ? `: ${active.semantic.failure}` : ""}`;
       ctx.ui.notify(
-        `${all.length} gotchas in ${active.store.dir} (${semantic}); surfaced this session: ${active.surfacer.seenCount()}`,
+        [
+          `${all.length} gotchas in ${active.store.dir} (${semantic})`,
+          `Recorded today: ${active.ledger.writesToday()} of ${active.settings.dailyWriteCap}`,
+          `Surfaced this session: ${active.surfacer.seenCount()}`,
+        ].join("\n"),
         "info",
       );
     },
   });
 
   pi.registerCommand("gotchas-review", {
-    description: "Show stale, duplicated and thin gotchas for human review",
+    description: "Show noisy, stale, duplicated and thin gotchas for human review",
     handler: async (_args: string, ctx: any) => {
       const active = ready(ctx);
-      ctx.ui.notify(renderReport(audit(active.store, active.root)), "info");
+      ctx.ui.notify(renderReport(audit(active.store, active.root, active.ledger)), "info");
     },
   });
 
@@ -131,37 +135,38 @@ export default function (pi: any): void {
         ctx.ui.notify("No gotchas to audit.", "info");
         return;
       }
-      const packet = auditPacket(active.store, active.root);
+      const packet = auditPacket(active.store, active.root, active.ledger);
       ctx.ui.notify(`Audit packet written to ${packet.path}`, "info");
       deliver(
         pi,
         [
           `A gotcha audit packet is at ${packet.path}.`,
-          `Delegate the review to a subagent: have it read that file, judge each gotcha against the rules in it,`,
-          `and append its proposals under the "${"## Proposals"}" heading of the same file. It must not edit the store itself.`,
-          `Then tell the user to review the file and run /gotchas-apply ${packet.path} to apply what they keep.`,
+          `Delegate the review to a subagent: have it read that file, judge each gotcha against the`,
+          `rules in it, and append its proposals under the "## Proposals" heading of the same file.`,
+          `It must not edit the store itself.`,
+          `Then tell the user to review the file and run /gotchas-apply to apply what they keep.`,
         ].join("\n"),
       );
     },
   });
 
   pi.registerCommand("gotchas-apply", {
-    description: "Apply retire/merge proposals from an audit packet",
+    description: "Apply retire/merge proposals from an audit packet (defaults to the newest)",
     handler: async (args: string, ctx: any) => {
       const active = ready(ctx);
       const target = args.trim();
-      if (!target) {
-        ctx.ui.notify("Usage: /gotchas-apply <audit-file>", "warning");
-        return;
-      }
-      const path = isAbsolute(target) ? target : join(active.root, target);
-      if (!existsSync(path)) {
-        ctx.ui.notify(`No such file: ${path}`, "warning");
+      const path = target
+        ? isAbsolute(target)
+          ? target
+          : join(active.root, target)
+        : newestPacket(active.store.cacheDir);
+      if (!path || !existsSync(path)) {
+        ctx.ui.notify(target ? `No such file: ${path}` : "No audit packet found; run /gotchas-audit first.", "warning");
         return;
       }
       const proposals = parseProposals(readFileSync(path, "utf8"));
       if (!proposals.length) {
-        ctx.ui.notify("No proposals found in that file.", "info");
+        ctx.ui.notify(`No proposals found in ${path}.`, "info");
         return;
       }
       const confirmed = await ctx.ui.confirm(
@@ -169,7 +174,7 @@ export default function (pi: any): void {
         `${proposals.length} proposals from ${path}. Files are deleted; git keeps the history.`,
       );
       if (!confirmed) return;
-      const applied = applyProposals(active.store, proposals);
+      const applied = applyProposals(active.store, proposals, active.ledger);
       void refreshSemantic(active);
       ctx.ui.notify(applied.join("\n"), "info");
     },

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { covers, matching, pathsIn, projectWide, staleScopes } from "../extensions/lib/paths.ts";
+import { covers, isRepoWide, matching, pathsIn, projectWide, specificity, staleScopes } from "../extensions/lib/paths.ts";
 import type { Gotcha } from "../extensions/lib/store.ts";
 import { cleanup, tempRoot } from "./helpers.ts";
 
@@ -28,9 +28,20 @@ describe("covers", () => {
     ["src/billing/", "src/export/csv.ts", false],
     ["./src/billing/", "src/billing/invoice.ts", true],
     ["", "src/billing/invoice.ts", false],
+    [".", "src/billing/invoice.ts", false],
+    ["/", "src/billing/invoice.ts", false],
   ];
   for (const [scope, touched, expected] of cases) {
     test(`${scope || "(empty)"} vs ${touched}`, () => assert.equal(covers(scope, touched), expected));
+  }
+});
+
+describe("isRepoWide", () => {
+  for (const scope of ["", ".", "./", "/", " . "]) {
+    test(`${JSON.stringify(scope)} is repo-wide`, () => assert.equal(isRepoWide(scope), true));
+  }
+  for (const scope of ["src/", "src/billing", "a/b/c.ts"]) {
+    test(`${scope} is not repo-wide`, () => assert.equal(isRepoWide(scope), false));
   }
 });
 
@@ -66,6 +77,20 @@ describe("pathsIn", () => {
     assert.deepEqual(pathsIn({ path: "/etc/passwd" }, root), []);
   });
 
+  test("a file body that merely mentions a path is not a touch", () => {
+    const root = project();
+    const content = `${"// filler comment line\n".repeat(60)}import x from "src/billing/invoice.ts";\n`;
+    assert.ok(content.length > 512);
+    assert.deepEqual(pathsIn({ path: "src/export/csv.ts", content }, root), ["src/export/csv.ts"]);
+  });
+
+  test("a long command is still scanned, at the head where its arguments are", () => {
+    const root = project();
+    const command = `grep -n total src/billing/invoice.ts ${"# padding".repeat(200)}`;
+    assert.ok(command.length > 512);
+    assert.deepEqual(pathsIn({ command }, root), ["src/billing/invoice.ts"]);
+  });
+
   test("known limit: a new file at the project root is invisible until it exists", () => {
     const root = project();
     assert.deepEqual(pathsIn({ path: "NOTES.md" }, root), []);
@@ -83,7 +108,8 @@ function gotcha(id: string, paths: string[]): Gotcha {
     summary: `${id} summary`,
     paths,
     aliases: [],
-    evidence: "",
+    expected: "",
+    actual: "",
     body: "",
     created: "2026-01-01",
     updated: "2026-01-01",
@@ -97,6 +123,7 @@ describe("matching", () => {
     gotcha("billing", ["src/billing/"]),
     gotcha("csv", ["src/export/csv.ts"]),
     gotcha("wide", []),
+    gotcha("repo", ["."]),
   ];
 
   test("directory scope matches a file inside it", () => {
@@ -107,10 +134,10 @@ describe("matching", () => {
     assert.deepEqual(matching(store, ["src/export/csv.ts"]).map((g) => g.id), ["csv"]);
   });
 
-  test("project-wide gotchas never match by path", () => {
+  test("pathless and repo-wide gotchas never match by path", () => {
     assert.deepEqual(matching(store, ["src/billing/invoice.ts", "src/export/csv.ts"]).map((g) => g.id), [
-      "billing",
       "csv",
+      "billing",
     ]);
   });
 
@@ -118,8 +145,23 @@ describe("matching", () => {
     assert.deepEqual(matching(store, []), []);
   });
 
-  test("projectWide selects exactly the pathless ones", () => {
-    assert.deepEqual(projectWide(store).map((g) => g.id), ["wide"]);
+  test("the most specific scope wins when the cap bites", () => {
+    const nested = [gotcha("broad", ["src/"]), gotcha("narrow", ["src/billing/invoice.ts"])];
+    assert.deepEqual(matching(nested, ["src/billing/invoice.ts"], 1).map((g) => g.id), ["narrow"]);
+  });
+
+  test("a cap of zero surfaces nothing", () => {
+    assert.deepEqual(matching(store, ["src/billing/invoice.ts"], 0), []);
+  });
+
+  test("specificity counts scope depth", () => {
+    assert.equal(specificity(gotcha("a", ["src/"]), ["src/billing/invoice.ts"]), 1);
+    assert.equal(specificity(gotcha("b", ["src/billing/"]), ["src/billing/invoice.ts"]), 2);
+    assert.equal(specificity(gotcha("c", ["docs/"]), ["src/billing/invoice.ts"]), 0);
+  });
+
+  test("projectWide takes the pathless and the repo-wide", () => {
+    assert.deepEqual(projectWide(store).map((g) => g.id), ["wide", "repo"]);
   });
 });
 
@@ -128,5 +170,9 @@ describe("staleScopes", () => {
     const root = project();
     const entry = gotcha("mixed", ["src/billing/", "src/gone/", "src/export/csv.ts"]);
     assert.deepEqual(staleScopes(entry, root), ["src/gone/"]);
+  });
+
+  test("a repo-wide scope is never stale", () => {
+    assert.deepEqual(staleScopes(gotcha("repo", ["."]), project()), []);
   });
 });

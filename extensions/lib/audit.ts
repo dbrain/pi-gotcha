@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Ledger } from "./ledger.ts";
 import { staleScopes } from "./paths.ts";
 import { jaccard } from "./text.ts";
 import type { Gotcha, GotchaStore } from "./store.ts";
@@ -9,10 +10,11 @@ export interface AuditReport {
   stale: Array<{ id: string; scopes: string[] }>;
   nearDuplicates: Array<{ a: string; b: string; overlap: number }>;
   thinEvidence: string[];
+  noisy: Array<{ id: string; surfaced: number }>;
   oldest: Array<{ id: string; updated: string }>;
 }
 
-export function audit(store: GotchaStore, root: string, all = store.list()): AuditReport {
+export function audit(store: GotchaStore, root: string, ledger?: Ledger, all = store.list()): AuditReport {
   const stale = all
     .map((gotcha) => ({ id: gotcha.id, scopes: staleScopes(gotcha, root) }))
     .filter((entry) => entry.scopes.length > 0);
@@ -24,7 +26,7 @@ export function audit(store: GotchaStore, root: string, all = store.list()): Aud
         `${all[i].summary} ${all[i].aliases.join(" ")}`,
         `${all[j].summary} ${all[j].aliases.join(" ")}`,
       );
-      if (overlap >= 0.35) nearDuplicates.push({ a: all[i].id, b: all[j].id, overlap: Number(overlap.toFixed(2)) });
+      if (overlap >= 0.3) nearDuplicates.push({ a: all[i].id, b: all[j].id, overlap: Number(overlap.toFixed(2)) });
     }
   }
 
@@ -32,7 +34,8 @@ export function audit(store: GotchaStore, root: string, all = store.list()): Aud
     total: all.length,
     stale,
     nearDuplicates: nearDuplicates.sort((x, y) => y.overlap - x.overlap).slice(0, 20),
-    thinEvidence: all.filter((gotcha) => gotcha.evidence.length < 30).map((gotcha) => gotcha.id),
+    thinEvidence: all.filter((gotcha) => `${gotcha.expected} ${gotcha.actual}`.trim().length < 40).map((g) => g.id),
+    noisy: ledger ? ledger.noise() : [],
     oldest: [...all]
       .sort((a, b) => (a.updated < b.updated ? -1 : 1))
       .slice(0, 10)
@@ -42,6 +45,10 @@ export function audit(store: GotchaStore, root: string, all = store.list()): Aud
 
 export function renderReport(report: AuditReport): string {
   const lines = [`${report.total} gotchas`];
+  if (report.noisy.length) {
+    lines.push(`${report.noisy.length} surfaced repeatedly but never opened:`);
+    for (const entry of report.noisy) lines.push(`  ${entry.id}: surfaced ${entry.surfaced} times, read 0`);
+  }
   if (report.stale.length) {
     lines.push(`${report.stale.length} with paths that no longer exist:`);
     for (const entry of report.stale) lines.push(`  ${entry.id}: ${entry.scopes.join(", ")}`);
@@ -51,29 +58,32 @@ export function renderReport(report: AuditReport): string {
     for (const pair of report.nearDuplicates) lines.push(`  ${pair.a} ~ ${pair.b} (${pair.overlap})`);
   }
   if (report.thinEvidence.length) lines.push(`Thin evidence: ${report.thinEvidence.join(", ")}`);
-  if (!report.stale.length && !report.nearDuplicates.length && !report.thinEvidence.length) {
+  if (!report.noisy.length && !report.stale.length && !report.nearDuplicates.length && !report.thinEvidence.length) {
     lines.push("Nothing flagged.");
   }
   return lines.join("\n");
 }
 
-function gotchaBlock(gotcha: Gotcha): string {
+function gotchaBlock(gotcha: Gotcha, ledger?: Ledger): string {
   const scope = gotcha.paths.length ? gotcha.paths.join(", ") : "project-wide";
+  const usage = ledger ? ledger.usage(gotcha.id) : { surfaced: 0, read: 0 };
   return [
     `### ${gotcha.id}`,
     `- summary: ${gotcha.summary}`,
     `- covers: ${scope}`,
     `- aliases: ${gotcha.aliases.join(", ") || "(none)"}`,
-    `- evidence: ${gotcha.evidence || "(none)"}`,
+    `- expected: ${gotcha.expected || "(none)"}`,
+    `- actual: ${gotcha.actual || "(none)"}`,
     `- updated: ${gotcha.updated}`,
+    `- surfaced ${usage.surfaced} times, opened ${usage.read} times`,
   ].join("\n");
 }
 
 export const PROPOSALS_HEADING = "## Proposals";
 
-export function auditPacket(store: GotchaStore, root: string): { path: string; text: string } {
+export function auditPacket(store: GotchaStore, root: string, ledger?: Ledger): { path: string; text: string } {
   const all = store.list();
-  const report = audit(store, root, all);
+  const report = audit(store, root, ledger, all);
   const text = [
     `# Gotcha audit — ${new Date().toISOString().slice(0, 10)}`,
     ``,
@@ -85,7 +95,7 @@ export function auditPacket(store: GotchaStore, root: string): { path: string; t
     ``,
     `## The store`,
     ``,
-    all.map(gotchaBlock).join("\n\n"),
+    all.map((gotcha) => gotchaBlock(gotcha, ledger)).join("\n\n"),
     ``,
     PROPOSALS_HEADING,
     ``,
@@ -99,7 +109,9 @@ export function auditPacket(store: GotchaStore, root: string): { path: string; t
     `Judge each gotcha against these rules:`,
     `- Would re-learning it cost a real investigation? If not, retire it.`,
     `- Does the code already say it, or a type, or a test name? If so, retire it.`,
-    `- Is it a record of what someone did, rather than what is true? Retire it.`,
+    `- Is it a record of what someone did, or a preference they stated? Retire it.`,
+    `- Has it surfaced many times and never been opened? That is the signature of noise: retire it`,
+    `  unless the knowledge is plainly load-bearing.`,
     `- Do two of them describe the same underlying fact? Merge them.`,
     `- Is it now wrong, or about code that no longer exists? Retire it.`,
     `Keep anything you are unsure about; a human reviews this file before anything is applied.`,
@@ -132,11 +144,16 @@ export function parseProposals(text: string): Proposal[] {
   return out;
 }
 
-export function applyProposals(store: GotchaStore, proposals: Proposal[]): string[] {
+export function applyProposals(store: GotchaStore, proposals: Proposal[], ledger?: Ledger): string[] {
   const applied: string[] = [];
   for (const proposal of proposals) {
     if (proposal.kind === "retire") {
-      applied.push(store.retire(proposal.id) ? `retired ${proposal.id}` : `skipped ${proposal.id} (not found)`);
+      const gone = store.retire(proposal.id);
+      if (gone && ledger) {
+        ledger.recordRetired(proposal.id, proposal.reason || "audit");
+        ledger.forget(proposal.id);
+      }
+      applied.push(gone ? `retired ${proposal.id}` : `skipped ${proposal.id} (not found)`);
       continue;
     }
     const keep = store.get(proposal.keep);
@@ -151,6 +168,10 @@ export function applyProposals(store: GotchaStore, proposals: Proposal[]): strin
       body: `${keep.body}\n\nMerged from ${drop.id}: ${drop.summary}\n\n${drop.body}`.trim(),
     });
     store.retire(drop.id);
+    if (ledger) {
+      ledger.recordRetired(drop.id, proposal.reason || `merged into ${keep.id}`);
+      ledger.forget(drop.id);
+    }
     applied.push(`merged ${drop.id} into ${keep.id}`);
   }
   return applied;

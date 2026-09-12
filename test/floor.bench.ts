@@ -40,7 +40,8 @@ before(async () => {
   for (const gotcha of GOTCHAS) {
     runtime.store.add({
       summary: gotcha.summary,
-      evidence: "fixture",
+      expected: "fixture expectation",
+      actual: "fixture outcome",
       paths: gotcha.paths,
       aliases: gotcha.aliases,
       body: gotcha.body,

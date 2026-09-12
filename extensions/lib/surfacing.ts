@@ -1,8 +1,18 @@
 import type { Gotcha } from "./store.ts";
 
+export function scopeOf(gotcha: Gotcha): string {
+  if (!gotcha.paths.length) return "project";
+  const [first, ...rest] = gotcha.paths;
+  return rest.length ? `${first} +${rest.length}` : first;
+}
+
 export function line(gotcha: Gotcha): string {
-  const scope = gotcha.paths.length ? gotcha.paths.join(", ") : "project";
-  return `[gotcha] ${scope} — ${gotcha.summary} (id: ${gotcha.id})`;
+  return `[gotcha] ${scopeOf(gotcha)} — ${gotcha.summary} (id: ${gotcha.id})`;
+}
+
+export interface Flushed {
+  text: string;
+  ids: string[];
 }
 
 export class Surfacer {
@@ -26,12 +36,13 @@ export class Surfacer {
     return [...this.staged.values()];
   }
 
-  flush(): string | null {
+  flush(): Flushed | null {
     if (!this.staged.size) return null;
+    const ids = [...this.staged.keys()];
     const text = [...this.staged.values()].join("\n");
-    for (const id of this.staged.keys()) this.seen.add(id);
+    for (const id of ids) this.seen.add(id);
     this.staged.clear();
-    return text;
+    return { text, ids };
   }
 
   // Compaction drops the earlier lines from context, so what was delivered is no longer known.

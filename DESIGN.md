@@ -7,9 +7,9 @@ What is built and why it is shaped this way. [README.md](README.md) is the overv
 ```
 <project>/.gotchas/
   invoice-cents.md
-  staging-migration-twice.md
+  settings.json       # optional, per-project overrides
   .gitignore          # written on first use, ignores .cache/
-  .cache/             # embeddings; rebuildable, never synced
+  .cache/             # embeddings, write budget, usage counts, audit packets
 ```
 
 One markdown file per gotcha, YAML header plus body:
@@ -17,109 +17,121 @@ One markdown file per gotcha, YAML header plus body:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `summary` | yes | The one line that gets surfaced, max 200 characters |
-| `paths` | no | Files and directory prefixes covered. Empty means project-wide |
-| `aliases` | no | Other words for the same thing; what retrieval leans on |
-| `evidence` | yes | Expected versus actual, and how it was found |
+| `paths` | no | Files and directory prefixes covered. Empty, or the repo root, means project-wide |
+| `aliases` | no | Other words for the same thing; retrieval leans on these |
+| `expected` | yes | What the author thought would happen |
+| `actual` | yes | What happened instead, and how they found out |
 | `created` / `updated` | auto | Dates |
 
-One file per gotcha so concurrent additions on different devices merge without conflict. Ids are a slug of the summary, deduplicated with a numeric suffix. Malformed files are skipped rather than fatal, so a hand-edit gone wrong costs one gotcha, not the store.
-
-`signature()` keys on mtime and size, not the `updated` date, which has day granularity and would otherwise serve a stale index for the rest of a session that edited a gotcha.
+One file per gotcha so concurrent additions on different devices merge without conflict. Malformed files are skipped rather than fatal. `list()` is cached behind `signature()`, which stats rather than parses, because it runs on every tool call.
 
 ## Retrieval
 
-Three channels with deliberately different scopes.
+**1. By path.** A tool call's input is scanned for path-shaped strings that exist, or whose parent exists. A gotcha matches when one of its `paths` equals or is a directory prefix of a touched path. Matches are ordered by scope depth and capped at `maxPathSurfacedPerTurn` (3), so a note about this file beats one about its package and a store full of broad notes cannot flood a turn.
 
-**1. By path.** Every tool call's input is scanned for path-shaped strings that exist, or whose parent directory exists, so a file about to be created still matches. A gotcha matches when one of its `paths` equals the touched path or is a directory prefix of it. No ranking: a path matches or it doesn't.
+Only addressing is scanned, never payload. An edit or write carries the whole file body, and a path in an import or comment is not a claim of attention; long strings are scanned only under a key that names a location (`path`, `command`, `file`…) and only at the head, where a command puts its arguments.
 
-**2. By relevance.** Project-wide gotchas can't be reached by touch, so they're ranked against the user's prompt at `before_agent_start`, then gated (below). Model prose and tool output are excluded from the query: they're long and drift toward what the agent just said rather than what it was asked.
+**2. By relevance.** Gotchas with no path — or scoped at the repo root — can't be reached by touch, so they're ranked against the user's prompt at `before_agent_start` and gated. Repo-wide knowledge is legitimate; surfacing it on every file touch is not, so it goes through ranking instead. Model prose and tool output are excluded from the query.
 
-The gate alone is not enough on a small store. A ratio compares the best result against the best one that wouldn't have been shown anyway, so with fewer candidates than the cap there is no rival and a lone weak match passes trivially. With embeddings there is a floor to catch that; without them nothing measures meaning, so a pushed gotcha must additionally share at least one non-stopword with the prompt. Found by the wiring test: "rename the button label on the settings screen" was surfacing a gotcha about migrations.
+**3. By explicit search.** The tool's `search` ranks everything and applies the relevance floor.
 
-**3. By explicit search.** The tool's `search` action ranks everything and applies the relevance floor.
-
-Ranking is hybrid: MiniSearch (BM25, fuzzy, prefix) over summary, aliases, paths and body with summary and aliases boosted, plus cosine similarity over embeddings of `summary + aliases`. The two are combined by reciprocal rank fusion, `1/(60 + rank)`, because their scores are not on a common scale.
+Ranking is hybrid: MiniSearch (BM25, fuzzy, prefix) over summary, aliases, paths and body, plus cosine over embeddings of `summary + aliases`, combined by reciprocal rank fusion (`1/(60 + rank)`) because the two scores are not on a common scale.
 
 ### Two thresholds, because the scores mean different things
 
-A BM25 score is a fraction of the query's own term mass, so it shrinks as the query grows and can't be compared against a constant; what is stable is how far the top result stands out from the best result that wouldn't have been shown anyway (`standout`, default 1.4). Cosine over normalized vectors is bounded and comparable across queries, so an absolute floor is meaningful (`semanticFloor`, default 0.55) and catches what the ratio misses: several genuinely relevant results that therefore don't stand out from each other.
+BM25 is a fraction of the query's own term mass, so it shrinks as the query grows and can't be compared against a constant; what is stable is how far the top result stands out from the best result that wouldn't have been shown anyway (`standout`, 1.4). Cosine over normalized vectors is bounded and comparable, so an absolute floor is meaningful (`semanticFloor`, 0.55).
 
-`prune()`, used by search, keeps what either channel is confident about (cosine ≥ 0.45, or BM25 ≥ 35% of the top hit) and uses cosine only to veto the plainly unrelated (`searchVeto`, default 0.15). That shape came from `npm run floors`: filtering on cosine alone reaches full silence at 0.25 and costs 8 of 40 recall, while this rule holds 30 of 40 with every unanswerable query silenced.
+`prune()`, used by search, keeps what either channel is confident about (cosine ≥ 0.45, or BM25 ≥ 35% of the top hit) and uses cosine only to veto the plainly unrelated (`searchVeto`, 0.15). From `npm run floors`: cosine alone reaches full silence at 0.25 and costs 8 of 40 recall; this rule holds 30 of 40 with every unanswerable query silenced.
+
+A ratio can't discriminate on a store too small to have rivals, so an unsolicited gotcha must also share a non-stopword with the prompt whenever embeddings are unavailable.
 
 ## Embeddings
 
-Optional and lazily imported, never a declared dependency: transformers.js pulls onnxruntime and sharp, about 300 MB, which has no business on a device that doesn't want it.
+Optional, lazily imported, never a declared dependency: transformers.js pulls onnxruntime and sharp, about 300 MB.
 
 - **local** — `all-MiniLM-L6-v2`, quantized, on the CPU.
 - **remote** — any OpenAI-compatible `/v1/embeddings` endpoint.
 - **off** — keyword only.
-- **auto** (default) — local if the package is installed, else remote if an endpoint is configured, else off.
+- **auto** (default) — local if installed, else remote if configured, else off.
 
-Install needs `--ignore-scripts`, because sharp builds from source on current Node; nothing here uses images, and onnxruntime still loads. Vectors are cached by content hash under `.gotchas/.cache/`, keyed by embedder id so switching models invalidates rather than mixes incomparable vectors. Refresh is backgrounded at session start; until it finishes, ranking is keyword-only rather than blocked. Any failure degrades to keyword-only and is reported by `/gotchas`.
+Install needs `--ignore-scripts`; sharp builds from source on current Node and nothing here uses images. The model loads on the first query that could use it, not at session start, because every background subagent runs in its own process and would otherwise each pay ~100 MB and a few seconds for a feature the session may never touch. That first query runs keyword-only.
+
+Vectors are cached by content hash, keyed by embedder id so switching models invalidates rather than mixes. Any failure degrades to keyword-only and is reported by `/gotchas`.
 
 ## Surfacing
 
 ```
-tool_call          → extract paths → match → stage
+tool_call          → extract paths → match, deepest first, capped → stage
 before_agent_start → rank project-wide → gate → stage
-agent_settled      → flush all staged as ONE appended message
+agent_settled      → flush all staged as ONE appended message → record usage
 session_compact    → clear the "already delivered" set
 ```
 
-One message per turn, not one per match: Pi drains one steering message per model round trip. Delivery is an appended message, never a system-prompt edit, so the cached prompt prefix survives. Each gotcha surfaces at most once per session; reading one through the tool withdraws its staged line, since pull beats push. Compaction clears the seen set because those lines are gone from context.
+One message per turn, because Pi drains one steering message per model round trip. Delivery is an appended message, never a system-prompt edit, so the cached prefix survives. Each gotcha surfaces at most once per session; reading one withdraws its staged line. A line names one scope plus a count (`src/billing/ +2`), never the whole list.
 
 ## The tool
 
 `gotcha` with six actions: `search`, `read`, `list`, `add`, `update`, `retire`.
 
-Write guards, all deterministic, because the write desk is where memory systems fail:
+The write desk is where memory systems fail, so every guard here is deterministic:
 
 | Guard | Effect |
 | --- | --- |
-| Evidence required, 15+ characters | A trivial observation has nothing to put there |
+| `expected` and `actual` both required | Structure is the bar. "I set this to 2 because the user likes even numbers" has nothing to put in either |
+| Junk patterns refused | Stated preferences, "I changed X", TODOs and reminders are rejected by wording, on add and update |
+| At least 2 aliases | Retrieval leans on them; without them the gotcha will not be found again |
 | Summary ≤ 200 characters | Keeps the surfaced line one line |
-| Duplicate check | Token overlap ≥ 0.5, or cosine ≥ `duplicateThreshold`, returns the existing gotcha instead of filing a near-copy |
-| Session cap | `sessionWriteCap` (3) new gotchas per session, then update-only |
-| Reason required to retire | Deletion is deliberate; git keeps the file |
+| Duplicate check | Token overlap ≥ `duplicateOverlap`, or cosine ≥ `duplicateThreshold`, returns the existing gotcha |
+| Daily write budget | `dailyWriteCap` (5) across every session and subagent, counted in the store, not in memory |
+| Reason required to retire | Logged to `.cache/retired.log`; git keeps the file |
+| `list` capped | `listLimit` (30), with a count of what it left out |
 
 ## Audit
 
 Deterministic checks first, model judgement second, human approval last:
 
-1. `/gotchas-review` prints stale paths, near-duplicate pairs and thin evidence. No model involved.
-2. `/gotchas-audit` writes an audit packet (every gotcha, compact, plus the automatic findings and the judging rules) to `.gotchas/.cache/`, then asks the agent to delegate the review to a subagent that appends proposals to the file. The subagent never touches the store.
+1. `/gotchas-review` prints what surfaced repeatedly and was never opened, stale paths, near-duplicates and thin evidence. No model involved.
+2. `/gotchas-audit` writes a packet — every gotcha with its usage counts, the automatic findings, and the judging rules — then asks the agent to delegate the review to a subagent that appends proposals. The subagent never touches the store.
 3. The human edits the file, deleting proposals they disagree with.
-4. `/gotchas-apply <file>` parses what survived and executes it, after a confirmation prompt. Two verbs: `retire <id>` and `merge <keep> <- <drop>`.
+4. `/gotchas-apply` (defaulting to the newest packet) parses what survived and executes it behind a confirmation. Two verbs: `retire <id>` and `merge <keep> <- <drop>`.
+
+Usage counts are what make this evidence-based: surfaced many times and never opened is the signature of noise, and both the report and the packet rules say so.
 
 ## Configuration
 
-`~/.config/pi-gotcha/settings.json`, or `PI_GOTCHA_EMBEDDINGS` for the provider alone:
+`~/.config/pi-gotcha/settings.json`, overridden per project by `<project>/.gotchas/settings.json`, with `PI_GOTCHA_EMBEDDINGS` overriding the provider everywhere:
 
 ```json
 {
   "surface": true,
   "maxSurfacedPerTurn": 2,
+  "maxPathSurfacedPerTurn": 3,
   "standout": 1.4,
   "semanticFloor": 0.55,
   "searchVeto": 0.15,
-  "sessionWriteCap": 3,
+  "dailyWriteCap": 5,
   "duplicateThreshold": 0.55,
+  "duplicateOverlap": 0.35,
+  "minEvidence": 15,
+  "requireAliases": 2,
+  "listLimit": 30,
   "embeddings": { "provider": "auto", "model": "Xenova/all-MiniLM-L6-v2" }
 }
 ```
 
+`"surface": false` in a project turns off both automatic channels there while leaving the tool available.
+
 ## Testing
 
-- `npm test` — 108 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and both thresholds, every write guard, surfacing lifecycle, audit parsing and application, and the extension wiring driven through a fake `pi` (touch a covered file, settle, assert one delivered line).
-- `npm run bench` — recall by query kind over the fixture corpus, with the misses printed by name. Add `PI_GOTCHA_EMBEDDINGS=local` to compare modes.
+- `npm test` — 160 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and all three thresholds, every write guard and refusal, the ledger's budget and usage counters, settings precedence, surfacing lifecycle, audit parsing and application, and extension wiring driven through a fake `pi`.
+- `npm run bench` — recall by query kind over the fixture corpus, misses printed by name. `PI_GOTCHA_EMBEDDINGS=local` to compare modes.
 - `npm run floors` — the recall-against-silence curve behind the default floor.
-
-The fixture corpus (`test/fixtures/corpus.ts`) is 30 gotchas and 45 queries, including paraphrases sharing no vocabulary with the stored wording, typos, task-phrased queries, and 5 unanswerable ones that must return nothing.
 
 ## Known limits
 
-- **Path extraction is best-effort.** A path built from a shell variable is missed, and so is a new file at the project root, which has no parent segment to prove it. Both are covered by tests that assert the limit rather than paper over it.
-- **Paraphrase recall is 42%** of delivered results in both modes. Aliases are the mitigation, and they depend on the model writing good ones.
+- **Path extraction is best-effort.** A path built from a shell variable is missed, as is a new file at the project root. Both are asserted as tests rather than papered over.
+- **Paraphrase recall is 42%** of delivered results in both modes; aliases are the mitigation.
 - **Typos cost recall**: fuzzy matching handles one-word slips, not `"stipe webhok retrys"`.
-- **The floor is tuned on a synthetic corpus** of 30 gotchas. Re-run `npm run floors` against a real store before trusting the default.
-- **Model discipline is unproven.** The guards bound the damage; `/gotchas-review` and code review catch the rest.
+- **The floor is tuned on a synthetic corpus** of 30 gotchas; re-run `npm run floors` against a real store.
+- **Junk detection is wording-based.** A preference dressed up as a finding will pass; the daily budget, usage counts and review command are the backstop.
+- **The first query of a session is keyword-only** while the model loads.

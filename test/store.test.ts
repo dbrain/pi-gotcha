@@ -35,7 +35,8 @@ describe("store", () => {
     assert.equal(read.summary, SAMPLE.summary);
     assert.deepEqual(read.paths, SAMPLE.paths);
     assert.deepEqual(read.aliases, SAMPLE.aliases);
-    assert.equal(read.evidence, SAMPLE.evidence);
+    assert.equal(read.expected, SAMPLE.expected);
+    assert.equal(read.actual, SAMPLE.actual);
     assert.equal(read.body, SAMPLE.body);
     assert.match(read.created, /^\d{4}-\d{2}-\d{2}$/);
   });
@@ -43,7 +44,11 @@ describe("store", () => {
   test("a summary with colons and quotes survives the round trip", () => {
     const store = new GotchaStore(root());
     const summary = 'Header "X-Trace: id" must match config: otherwise the gateway drops it';
-    const written = store.add({ summary, evidence: "Requests vanished with no log line at all" });
+    const written = store.add({
+      summary,
+      expected: "The gateway to forward the header untouched",
+      actual: "Requests vanished with no log line at all",
+    });
     assert.equal(store.get(written.id)?.summary, summary);
   });
 
@@ -62,7 +67,7 @@ describe("store", () => {
     assert.equal(updated?.summary, "New summary");
     assert.deepEqual(updated?.aliases, ["x"]);
     assert.equal(updated?.created, written.created);
-    assert.equal(updated?.evidence, SAMPLE.evidence);
+    assert.equal(updated?.expected, SAMPLE.expected);
   });
 
   test("update of a missing id returns undefined", () => {

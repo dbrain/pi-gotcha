@@ -1,9 +1,8 @@
-import { MAX_SUMMARY, type Gotcha } from "./store.ts";
 import { prune } from "./rank.ts";
-import { jaccard } from "./text.ts";
 import { byId, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./runtime.ts";
-
-export const MIN_EVIDENCE = 15;
+import { scopeOf } from "./surfacing.ts";
+import { jaccard } from "./text.ts";
+import { MAX_SUMMARY, type Gotcha } from "./store.ts";
 
 export const TOOL_PARAMETERS = {
   type: "object",
@@ -15,23 +14,28 @@ export const TOOL_PARAMETERS = {
       type: "string",
       description: `add, update: ONE line stating the surprising fact and its consequence, under ${MAX_SUMMARY} characters.`,
     },
-    evidence: {
+    expected: {
       type: "string",
-      description: "add, update: what you expected, what actually happened, and how you found out.",
+      description: "add, update: what you expected to happen, or what the code looks like it does.",
+    },
+    actual: {
+      type: "string",
+      description: "add, update: what actually happened, and how you found out.",
     },
     paths: {
       type: "array",
       items: { type: "string" },
       description:
         "add, update: files or directories this covers, repo-relative; end a directory with '/'. " +
-        "Omit only for knowledge that is not tied to any path.",
+        "Omit for knowledge that is not tied to any path; knowledge that covers the whole repo " +
+        "is reached by relevance rather than by touch.",
     },
     aliases: {
       type: "array",
       items: { type: "string" },
       description:
         "add, update: other words someone might search for instead of your wording. This is what " +
-        "makes the gotcha findable later; give 2-5.",
+        "makes the gotcha findable later; give at least two.",
     },
     body: { type: "string", description: "add, update: the detail, including exact values, names and limits." },
     reason: { type: "string", description: "retire: why this is no longer true." },
@@ -44,14 +48,34 @@ export const TOOL_DESCRIPTION =
   "Hard-won project knowledge: things that cost real investigation and that reading the code does " +
   "not tell you. search it when you hit surprising behaviour or start work in an unfamiliar area; " +
   "relevant gotchas also arrive unasked when you touch the files they cover. " +
-  "add one ONLY when you learned something that would cost the next session the same investigation: " +
+  "add one ONLY when something surprised you and would surprise the next session the same way: " +
   "a silent failure, an undocumented constraint, a value that must match something elsewhere. " +
-  "Do NOT add what the code already shows, what a type says, what you just did, or what worked as " +
-  "documented. If the knowledge belongs at one line of code, write a comment there instead. " +
-  "Prefer update over add: a near-duplicate is refused. retire one when you find it is wrong.";
+  "Every add states what you expected and what actually happened; if you cannot fill both in, it " +
+  "is not a gotcha. Do NOT record what the code shows, what a type says, what you just did, a " +
+  "preference you were told, or something that worked as documented. If the knowledge belongs at " +
+  "one line of code, write a comment there instead. Prefer update over add: a near-duplicate is " +
+  "refused. retire one when you find it is wrong.";
+
+/* A record of what someone did, or was told to prefer, is the commonest kind of junk a memory
+   store fills with, and it is recognisable from the wording alone. Cheaper to refuse here
+   than to ask a human to clean it up later. */
+const NOT_A_GOTCHA: Array<{ pattern: RegExp; why: string }> = [
+  {
+    pattern: /\b(prefers?|likes?|wants?|asked (?:me|us) to|requested)\b/i,
+    why: "this reads as a preference someone stated, not something that surprised you",
+  },
+  {
+    pattern: /^\s*(?:i|we)\s+(?:changed|added|updated|set|renamed|removed|fixed|created|refactored|bumped)\b/i,
+    why: "this reads as a record of what you just did, not a durable constraint",
+  },
+  {
+    pattern: /\b(?:todo|next time|we should|remember to|don't forget)\b/i,
+    why: "this reads as a plan or reminder, not knowledge about how the system behaves",
+  },
+];
 
 function describe(gotcha: Gotcha): string {
-  const scope = gotcha.paths.length ? gotcha.paths.join(", ") : "project-wide";
+  const scope = gotcha.paths.length ? scopeOf(gotcha) : "project-wide";
   return `${gotcha.id} — ${gotcha.summary} [${scope}]`;
 }
 
@@ -62,7 +86,9 @@ async function findDuplicate(runtime: Runtime, summary: string, aliases: string[
   const index = byId(all);
 
   for (const gotcha of all) {
-    if (jaccard(probe, `${gotcha.summary} ${gotcha.aliases.join(" ")}`) >= 0.5) return gotcha;
+    if (jaccard(probe, `${gotcha.summary} ${gotcha.aliases.join(" ")}`) >= runtime.settings.duplicateOverlap) {
+      return gotcha;
+    }
   }
 
   const ranked = await hybridSearch(runtime, probe, 3);
@@ -75,15 +101,24 @@ export interface ToolResult {
   text: string;
 }
 
+function refuseJunk(summary: string): string | null {
+  for (const { pattern, why } of NOT_A_GOTCHA) {
+    if (pattern.test(summary)) {
+      return `Not recorded: ${why}. A gotcha is something that behaved differently from what you expected, and that would cost the next session the same investigation.`;
+    }
+  }
+  return null;
+}
+
 export async function runGotchaTool(runtime: Runtime, params: Record<string, unknown>): Promise<ToolResult> {
   const action = String(params.action ?? "");
-  const store = runtime.store;
+  const { store, ledger, settings } = runtime;
 
   if (action === "search") {
     const query = String(params.query ?? "").trim();
     if (!query) return { text: "search needs a query." };
     const limit = Number(params.limit) > 0 ? Number(params.limit) : 5;
-    const ranked = prune(await hybridSearch(runtime, query, limit), runtime.settings.searchVeto);
+    const ranked = prune(await hybridSearch(runtime, query, limit), settings.searchVeto);
     if (!ranked.length) return { text: "No gotchas recorded for that." };
     const index = byId(gotchas(runtime));
     const lines = ranked
@@ -99,15 +134,17 @@ export async function runGotchaTool(runtime: Runtime, params: Record<string, unk
     const gotcha = store.get(id);
     if (!gotcha) return { text: `No gotcha with id ${id}.` };
     runtime.surfacer.withdraw(id);
+    ledger.recordRead(id);
     const scope = gotcha.paths.length ? gotcha.paths.join(", ") : "project-wide";
     return {
       text: [
         `# ${gotcha.id}`,
-        `${gotcha.summary}`,
+        gotcha.summary,
         ``,
         `Covers: ${scope}`,
         gotcha.aliases.length ? `Also known as: ${gotcha.aliases.join(", ")}` : "",
-        `Evidence: ${gotcha.evidence}`,
+        `Expected: ${gotcha.expected}`,
+        `Actually: ${gotcha.actual}`,
         `Updated: ${gotcha.updated}`,
         ``,
         gotcha.body,
@@ -120,32 +157,49 @@ export async function runGotchaTool(runtime: Runtime, params: Record<string, unk
   if (action === "list") {
     const all = gotchas(runtime);
     if (!all.length) return { text: "No gotchas recorded yet." };
-    const limit = Number(params.limit) > 0 ? Number(params.limit) : all.length;
-    return { text: all.slice(0, limit).map(describe).join("\n") };
+    const limit = Number(params.limit) > 0 ? Number(params.limit) : settings.listLimit;
+    const shown = all.slice(0, limit).map(describe).join("\n");
+    const rest = all.length - Math.min(limit, all.length);
+    return { text: rest > 0 ? `${shown}\n…and ${rest} more; use search to find them.` : shown };
   }
 
   if (action === "add") {
     const summary = String(params.summary ?? "").trim();
-    const evidence = String(params.evidence ?? "").trim();
-    const aliases = Array.isArray(params.aliases) ? params.aliases.map(String) : [];
-    const paths = Array.isArray(params.paths) ? params.paths.map(String) : [];
+    const expected = String(params.expected ?? "").trim();
+    const actual = String(params.actual ?? "").trim();
+    const aliases = Array.isArray(params.aliases) ? params.aliases.map(String).filter(Boolean) : [];
+    const paths = Array.isArray(params.paths) ? params.paths.map(String).filter(Boolean) : [];
 
     if (!summary) return { text: "add needs a summary." };
     if (summary.length > MAX_SUMMARY) {
       return { text: `Summary is ${summary.length} characters; keep it under ${MAX_SUMMARY}.` };
     }
-    if (evidence.length < MIN_EVIDENCE) {
+
+    const junk = refuseJunk(summary);
+    if (junk) return { text: junk };
+
+    if (expected.length < settings.minEvidence || actual.length < settings.minEvidence) {
       return {
         text:
-          "add needs evidence: what you expected, what actually happened, and how you found out. " +
-          "If there is nothing to put there, this is not a gotcha.",
+          "add needs both `expected` (what you thought would happen) and `actual` (what happened " +
+          "instead, and how you found out). If there is nothing to put in either, this is not a gotcha.",
       };
     }
-    if (runtime.session.writes >= runtime.settings.sessionWriteCap) {
+    if (aliases.length < settings.requireAliases) {
       return {
         text:
-          `Already recorded ${runtime.session.writes} gotchas this session, which is the cap. ` +
-          "Update an existing one instead, or keep this for a session where it is the main finding.",
+          `add needs at least ${settings.requireAliases} aliases: other words someone might search ` +
+          "for instead of your wording. Without them this will not be found again.",
+      };
+    }
+
+    const written = ledger.writesToday();
+    if (written >= settings.dailyWriteCap) {
+      return {
+        text:
+          `${written} gotchas were already recorded today, which is the cap across all sessions ` +
+          "and subagents. Update an existing one instead, or keep this for a day where it is the " +
+          "main finding.",
       };
     }
 
@@ -158,10 +212,11 @@ export async function runGotchaTool(runtime: Runtime, params: Record<string, unk
       };
     }
 
-    const created = store.add({ summary, evidence, paths, aliases, body: String(params.body ?? "") });
-    runtime.session.writes += 1;
+    const created = store.add({ summary, expected, actual, paths, aliases, body: String(params.body ?? "") });
+    ledger.recordWrite();
     void refreshSemantic(runtime);
-    return { text: `Recorded ${created.id}.` };
+    const remaining = settings.dailyWriteCap - written - 1;
+    return { text: `Recorded ${created.id}. ${remaining} more can be recorded today.` };
   }
 
   if (action === "update") {
@@ -169,13 +224,18 @@ export async function runGotchaTool(runtime: Runtime, params: Record<string, unk
     if (!store.get(id)) return { text: `No gotcha with id ${id}.` };
     const patch: Record<string, unknown> = {};
     if (typeof params.summary === "string") patch.summary = params.summary;
-    if (typeof params.evidence === "string") patch.evidence = params.evidence;
+    if (typeof params.expected === "string") patch.expected = params.expected;
+    if (typeof params.actual === "string") patch.actual = params.actual;
     if (typeof params.body === "string") patch.body = params.body;
     if (Array.isArray(params.paths)) patch.paths = params.paths.map(String);
     if (Array.isArray(params.aliases)) patch.aliases = params.aliases.map(String);
     if (!Object.keys(patch).length) return { text: "update needs at least one field to change." };
-    if (typeof patch.summary === "string" && patch.summary.length > MAX_SUMMARY) {
-      return { text: `Summary is ${patch.summary.length} characters; keep it under ${MAX_SUMMARY}.` };
+    if (typeof patch.summary === "string") {
+      if (patch.summary.length > MAX_SUMMARY) {
+        return { text: `Summary is ${patch.summary.length} characters; keep it under ${MAX_SUMMARY}.` };
+      }
+      const junk = refuseJunk(patch.summary);
+      if (junk) return { text: junk };
     }
     const updated = store.update(id, patch);
     void refreshSemantic(runtime);
@@ -186,9 +246,12 @@ export async function runGotchaTool(runtime: Runtime, params: Record<string, unk
     const id = String(params.id ?? "").trim();
     const reason = String(params.reason ?? "").trim();
     if (!reason) return { text: "retire needs a reason." };
-    const gone = store.retire(id);
-    if (gone) void refreshSemantic(runtime);
-    return { text: gone ? `Retired ${id}. Reason recorded in this conversation; git keeps the file history.` : `No gotcha with id ${id}.` };
+    if (!store.get(id)) return { text: `No gotcha with id ${id}.` };
+    store.retire(id);
+    ledger.recordRetired(id, reason);
+    ledger.forget(id);
+    void refreshSemantic(runtime);
+    return { text: `Retired ${id}. The reason is logged and git keeps the file history.` };
   }
 
   return { text: `Unknown action "${action}".` };
