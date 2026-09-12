@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import register from "../extensions/index.ts";
@@ -86,7 +86,7 @@ describe("extension wiring", () => {
     assert.ok(pi.tools.has("gotcha"));
     assert.deepEqual(
       [...pi.commands.keys()].sort(),
-      ["gotchas", "gotchas-apply", "gotchas-audit", "gotchas-budget", "gotchas-review"],
+      ["gotchas", "gotchas-apply", "gotchas-audit", "gotchas-budget", "gotchas-index", "gotchas-review"],
     );
   });
 
@@ -200,6 +200,16 @@ describe("extension wiring", () => {
     await pi.emit("tool_call", { toolName: "read", input: { path: "src/billing/invoice.ts" } }, ctx);
     await pi.emit("agent_settled", {}, ctx);
     assert.deepEqual(pi.sent, []);
+  });
+
+  test("the index command writes a browsable map", async () => {
+    const pi = fakePi();
+    const { ctx, root } = project();
+    register(pi as any);
+    await pi.commands.get("gotchas-index").handler("", ctx);
+    const index = readFileSync(join(root, ".gotchas", ".cache", "index.md"), "utf8");
+    assert.match(index, /## src\/billing\//);
+    assert.match(index, /## project-wide/);
   });
 
   test("the tool executes through pi's interface", async () => {

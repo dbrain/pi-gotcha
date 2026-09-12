@@ -40,6 +40,7 @@ export const TOOL_PARAMETERS = {
     body: { type: "string", description: "add, update: the detail, including exact values, names and limits." },
     reason: { type: "string", description: "retire: why this is no longer true." },
     limit: { type: "number", description: "search, list: maximum results." },
+    offset: { type: "number", description: "read: continue a long body from this character offset." },
   },
   required: ["action"],
 } as const;
@@ -143,24 +144,38 @@ export async function runGotchaTool(
     const id = String(params.id ?? "").trim();
     const gotcha = store.get(id);
     if (!gotcha) return { text: `No gotcha with id ${id}.` };
-    runtime.surfacer.withdraw(id);
-    ledger.recordRead(id);
+
+    const asked = Number(params.offset);
+    const offset = Number.isFinite(asked) && asked > 0 ? Math.floor(asked) : 0;
+    // Continuing a body the agent already chose to open is not a second decision to open it.
+    if (offset === 0) {
+      runtime.surfacer.withdraw(id);
+      ledger.recordRead(id);
+    }
+
+    const slice = gotcha.body.slice(offset, offset + settings.readChunk);
+    const remaining = Math.max(0, gotcha.body.length - (offset + slice.length));
+    const more = remaining > 0 ? `\n\n…${remaining} more characters; read again with offset: ${offset + slice.length}` : "";
+
+    if (offset > 0) return { text: `# ${gotcha.id} (from ${offset})\n\n${slice}${more}` };
+
     const scope = gotcha.paths.length ? gotcha.paths.join(", ") : "project-wide";
     return {
-      text: [
-        `# ${gotcha.id}`,
-        gotcha.summary,
-        ``,
-        `Covers: ${scope}`,
-        gotcha.aliases.length ? `Also known as: ${gotcha.aliases.join(", ")}` : "",
-        `Expected: ${gotcha.expected}`,
-        `Actually: ${gotcha.actual}`,
-        `Updated: ${gotcha.updated}`,
-        ``,
-        gotcha.body,
-      ]
-        .filter((part) => part !== "")
-        .join("\n"),
+      text:
+        [
+          `# ${gotcha.id}`,
+          gotcha.summary,
+          ``,
+          `Covers: ${scope}`,
+          gotcha.aliases.length ? `Also known as: ${gotcha.aliases.join(", ")}` : "",
+          `Expected: ${gotcha.expected}`,
+          `Actually: ${gotcha.actual}`,
+          `Updated: ${gotcha.updated}`,
+          ``,
+          slice,
+        ]
+          .filter((part) => part !== "")
+          .join("\n") + more,
     };
   }
 
@@ -187,6 +202,16 @@ export async function runGotchaTool(
 
     const junk = refuseJunk(summary);
     if (junk) return { text: junk };
+
+    const body = String(params.body ?? "");
+    if (body.length > settings.maxBodyChars) {
+      return {
+        text:
+          `The body is ${body.length} characters; keep it under ${settings.maxBodyChars}. ` +
+          "Record the constraint and the exact values that matter, and point at the file, test or " +
+          "commit instead of pasting output into it.",
+      };
+    }
 
     if (expected.length < settings.minEvidence || actual.length < settings.minEvidence) {
       return {
@@ -230,7 +255,7 @@ export async function runGotchaTool(
       };
     }
 
-    const created = store.add({ summary, expected, actual, paths, aliases, body: String(params.body ?? "") });
+    const created = store.add({ summary, expected, actual, paths, aliases, body });
     ledger.recordWrite();
     void refreshSemantic(runtime);
     const remaining = Math.max(0, cap - written - 1);
@@ -252,6 +277,9 @@ export async function runGotchaTool(
     if (Array.isArray(params.paths)) patch.paths = params.paths.map(String);
     if (Array.isArray(params.aliases)) patch.aliases = params.aliases.map(String);
     if (!Object.keys(patch).length) return { text: "update needs at least one field to change." };
+    if (typeof patch.body === "string" && patch.body.length > settings.maxBodyChars) {
+      return { text: `The body is ${patch.body.length} characters; keep it under ${settings.maxBodyChars}.` };
+    }
     if (typeof patch.summary === "string") {
       if (patch.summary.length > MAX_SUMMARY) {
         return { text: `Summary is ${patch.summary.length} characters; keep it under ${MAX_SUMMARY}.` };

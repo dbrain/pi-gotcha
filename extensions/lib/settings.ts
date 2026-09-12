@@ -18,6 +18,8 @@ export interface Settings {
   minEvidence: number;
   requireAliases: number;
   listLimit: number;
+  maxBodyChars: number;
+  readChunk: number;
   embeddings: {
     provider: EmbeddingProvider;
     model: string;
@@ -40,6 +42,8 @@ export const DEFAULTS: Settings = {
   minEvidence: 15,
   requireAliases: 2,
   listLimit: 30,
+  maxBodyChars: 8000,
+  readChunk: 2000,
   embeddings: {
     provider: "auto",
     model: "Xenova/all-MiniLM-L6-v2",
@@ -58,6 +62,8 @@ const NUMERIC: Array<keyof Settings> = [
   "minEvidence",
   "requireAliases",
   "listLimit",
+  "maxBodyChars",
+  "readChunk",
 ];
 
 export function settingsPath(): string {

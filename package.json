@@ -9,7 +9,7 @@
     "memory",
     "gotchas"
   ],
-  "license": "MIT",
+  "license": "Unlicense",
   "type": "module",
   "engines": {
     "node": ">=22.18"

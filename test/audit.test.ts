@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { applyProposals, audit, auditPacket, parseProposals, PROPOSALS_HEADING } from "../extensions/lib/audit.ts";
+import {
+  applyProposals,
+  audit,
+  auditPacket,
+  parseProposals,
+  PROPOSALS_HEADING,
+  writeIndex,
+} from "../extensions/lib/audit.ts";
 import { Ledger } from "../extensions/lib/ledger.ts";
 import { GotchaStore } from "../extensions/lib/store.ts";
 import { cleanup, tempRoot } from "./helpers.ts";
@@ -86,6 +93,32 @@ describe("audit packet", () => {
     assert.match(text, /Would re-learning it cost a real investigation/);
     assert.match(text, /never been opened/);
     assert.ok(text.includes(PROPOSALS_HEADING));
+  });
+});
+
+describe("writeIndex", () => {
+  test("groups by what each gotcha covers and carries its usage", () => {
+    const root = project();
+    const store = new GotchaStore(root);
+    const scoped = store.add(BILLING);
+    const wide = store.add({ ...BILLING, summary: "Deploys need two migration passes", paths: [], aliases: ["deploy"] });
+    const ledger = new Ledger(store);
+    ledger.recordSurfaced([scoped.id]);
+    ledger.recordRead(scoped.id);
+
+    const written = writeIndex(store, ledger);
+    const text = readFileSync(written.path, "utf8");
+    assert.equal(written.count, 2);
+    assert.match(text, /## src\/billing\//);
+    assert.match(text, /## project-wide/);
+    assert.match(text, new RegExp(`\\*\\*${scoped.id}\\*\\*`));
+    assert.match(text, new RegExp(`\\*\\*${wide.id}\\*\\*`));
+    assert.match(text, /surfaced 1, opened 1/);
+  });
+
+  test("an empty store still writes a valid index", () => {
+    const store = new GotchaStore(project());
+    assert.equal(writeIndex(store).count, 0);
   });
 });
 

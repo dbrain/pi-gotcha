@@ -123,6 +123,34 @@ export function auditPacket(store: GotchaStore, root: string, ledger?: Ledger): 
   return { path, text };
 }
 
+// A browsable map for a human, written to the cache rather than committed: a single tracked
+// index file is one more thing every device rewrites, which is what one-file-per-gotcha avoids.
+export function writeIndex(store: GotchaStore, ledger?: Ledger): { path: string; count: number } {
+  const all = store.list();
+  const scoped = new Map<string, Gotcha[]>();
+  for (const gotcha of all) {
+    const key = gotcha.paths.length ? gotcha.paths[0] : "project-wide";
+    scoped.set(key, [...(scoped.get(key) ?? []), gotcha]);
+  }
+
+  const lines = [`# Gotchas — ${all.length} recorded`, ``];
+  for (const scope of [...scoped.keys()].sort()) {
+    lines.push(`## ${scope}`, ``);
+    for (const gotcha of scoped.get(scope)!) {
+      const usage = ledger ? ledger.usage(gotcha.id) : { surfaced: 0, read: 0 };
+      lines.push(
+        `- **${gotcha.id}** — ${gotcha.summary}`,
+        `  <sub>${gotcha.updated} · surfaced ${usage.surfaced}, opened ${usage.read} · ${gotcha.file}</sub>`,
+      );
+    }
+    lines.push(``);
+  }
+
+  const path = join(store.ensureCacheDir(), "index.md");
+  writeFileSync(path, lines.join("\n"));
+  return { path, count: all.length };
+}
+
 export type Proposal =
   | { kind: "retire"; id: string; reason: string }
   | { kind: "merge"; keep: string; drop: string; reason: string };

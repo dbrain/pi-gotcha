@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { applyProposals, audit, auditPacket, parseProposals, renderReport } from "./lib/audit.ts";
+import { applyProposals, audit, auditPacket, parseProposals, renderReport, writeIndex } from "./lib/audit.ts";
 import { matching, pathsIn, projectWide } from "./lib/paths.ts";
 import { gate } from "./lib/rank.ts";
 import { byId, createRuntime, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./lib/runtime.ts";
@@ -122,6 +122,19 @@ export default function (pi: any): void {
         ].join("\n"),
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("gotchas-index", {
+    description: "Write a browsable index of every gotcha, grouped by what it covers",
+    handler: async (_args: string, ctx: any) => {
+      const active = ready(ctx);
+      if (!gotchas(active).length) {
+        ctx.ui.notify("No gotchas to index.", "info");
+        return;
+      }
+      const written = writeIndex(active.store, active.ledger);
+      ctx.ui.notify(`Indexed ${written.count} gotchas to ${written.path}`, "info");
     },
   });
 

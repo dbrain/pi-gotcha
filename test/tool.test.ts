@@ -216,6 +216,50 @@ describe("other actions", () => {
     assert.equal(active.ledger.usage(id).read, 1);
   });
 
+  test("refuses a body that is really pasted output", async () => {
+    const active = runtime();
+    const result = await runGotchaTool(active, { ...ADD, body: "x".repeat(9000) });
+    assert.match(result.text, /keep it under 8000/);
+    assert.equal(active.store.list().length, 0);
+  });
+
+  test("refuses an oversized body on update too", async () => {
+    const active = runtime();
+    const id = idFromResult((await runGotchaTool(active, ADD)).text);
+    assert.match((await runGotchaTool(active, { action: "update", id, body: "x".repeat(9000) })).text, /keep it under/);
+  });
+
+  test("a long body is delivered in pieces", async () => {
+    const active = runtime({ readChunk: 50 });
+    const id = idFromResult((await runGotchaTool(active, { ...ADD, body: "b".repeat(200) })).text);
+
+    const first = await runGotchaTool(active, { action: "read", id });
+    assert.match(first.text, /Expected:/);
+    assert.match(first.text, /…150 more characters; read again with offset: 50/);
+    assert.ok(first.text.includes("b".repeat(50)), "delivers the first chunk");
+    assert.ok(!first.text.includes("b".repeat(51)), "and no more than the chunk");
+
+    const next = await runGotchaTool(active, { action: "read", id, offset: 50 });
+    assert.match(next.text, new RegExp(`^# ${id} \\(from 50\\)`));
+    assert.match(next.text, /…100 more characters/);
+  });
+
+  test("continuing a body is not a second opening", async () => {
+    const active = runtime({ readChunk: 50 });
+    const id = idFromResult((await runGotchaTool(active, { ...ADD, body: "b".repeat(200) })).text);
+    await runGotchaTool(active, { action: "read", id });
+    await runGotchaTool(active, { action: "read", id, offset: 50 });
+    assert.equal(active.ledger.usage(id).read, 1);
+  });
+
+  test("a short body arrives whole, with nothing to continue", async () => {
+    const active = runtime();
+    const id = idFromResult((await runGotchaTool(active, ADD)).text);
+    const result = await runGotchaTool(active, { action: "read", id });
+    assert.doesNotMatch(result.text, /more characters/);
+    assert.match(result.text, new RegExp(SAMPLE.body!.slice(0, 20)));
+  });
+
   test("read of a missing id says so", async () => {
     assert.match((await runGotchaTool(runtime(), { action: "read", id: "nope" })).text, /No gotcha with id/);
   });

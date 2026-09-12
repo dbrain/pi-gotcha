@@ -85,6 +85,9 @@ The write desk is where memory systems fail, so every guard here is deterministi
 | Daily write budget | `dailyWriteCap` (5) across every session and subagent, counted in the store, not in memory. `update` is exempt: refining an existing gotcha is unlimited. Over budget, the tool asks the user through `ctx.ui.confirm` and counts approvals; with no UI — a background subagent — it is refused. `/gotchas-budget <n>` raises the allowance for today only |
 | Reason required to retire | Logged to `.cache/retired.log`; git keeps the file |
 | `list` capped | `listLimit` (30), with a count of what it left out |
+| Body capped | `maxBodyChars` (8000) on add and update: record the constraint and the values that matter, and point at the file or commit rather than pasting output |
+
+`read` is the only channel that returns a body, and it returns `readChunk` (2000) characters at a time with an offset to continue, so one heavy gotcha cannot flood a session. Continuing is not counted as a second opening.
 
 ## Audit
 
@@ -96,6 +99,8 @@ Deterministic checks first, model judgement second, human approval last:
 4. `/gotchas-apply` (defaulting to the newest packet) parses what survived and executes it behind a confirmation. Two verbs: `retire <id>` and `merge <keep> <- <drop>`.
 
 Usage counts are what make this evidence-based: surfaced many times and never opened is the signature of noise, and both the report and the packet rules say so.
+
+`/gotchas-index` writes a browsable map — every gotcha grouped by what it covers, with its usage counts and file path — into the cache rather than the tracked tree, because a single committed index is one more file every device rewrites.
 
 ## Configuration
 
@@ -116,6 +121,8 @@ Usage counts are what make this evidence-based: surfaced many times and never op
   "minEvidence": 15,
   "requireAliases": 2,
   "listLimit": 30,
+  "maxBodyChars": 8000,
+  "readChunk": 2000,
   "embeddings": { "provider": "auto", "model": "Xenova/all-MiniLM-L6-v2" }
 }
 ```
@@ -124,7 +131,7 @@ Usage counts are what make this evidence-based: surfaced many times and never op
 
 ## Testing
 
-- `npm test` — 160 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and all three thresholds, every write guard and refusal, the ledger's budget and usage counters, settings precedence, surfacing lifecycle, audit parsing and application, and extension wiring driven through a fake `pi`.
+- `npm test` — 179 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and all three thresholds, every write guard and refusal, body capping and paginated reads, the ledger's budget, allowance and usage counters, settings precedence, surfacing lifecycle, audit parsing and application, index generation, and extension wiring driven through a fake `pi`.
 - `npm run bench` — recall by query kind over the fixture corpus, misses printed by name. `PI_GOTCHA_EMBEDDINGS=local` to compare modes.
 - `npm run floors` — the recall-against-silence curve behind the default floor.
 

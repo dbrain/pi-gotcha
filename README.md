@@ -77,7 +77,9 @@ Two channels, neither of which needs the agent to remember to ask:
 
 Both are capped — 3 lines from paths, 2 from relevance, the most specific scope first — each gotcha at most once per session, appended as a message so the cached prompt prefix stays intact. Only a tool call's addressing is scanned, never the file contents it carries, so a path mentioned inside a diff is not treated as a visit.
 
-The agent can also search explicitly, which is the only channel that returns full text.
+The agent can also search explicitly. `read` is the only channel that returns a body, and it returns it 2000 characters at a time, so one long gotcha can't flood a session. Bodies are capped at 8000 characters on the way in: record the constraint and the values that matter, and point at the file or commit instead of pasting output.
+
+`/gotchas-index` writes a browsable map of the whole store, grouped by what each gotcha covers, for when you want to read it yourself.
 
 See [DESIGN.md](DESIGN.md) for how ranking, storage and surfacing actually work, and the build order.
 
