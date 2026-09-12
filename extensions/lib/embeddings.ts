@@ -12,7 +12,10 @@ export interface Embedder {
 export const LOCAL_PACKAGE = "@huggingface/transformers";
 
 export function embeddingText(gotcha: Gotcha): string {
-  return [gotcha.summary, gotcha.aliases.join(", ")].filter(Boolean).join(". ");
+  return [gotcha.summary, gotcha.trigger, gotcha.aliases.join(", "), gotcha.actual]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(". ");
 }
 
 export function cosine(a: number[], b: number[]): number {

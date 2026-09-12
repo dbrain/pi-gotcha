@@ -21,21 +21,27 @@ const KINDS: Query["kind"][] = ["verbatim", "synonym", "typo", "path", "task", "
 let root = "";
 let runtime: Runtime;
 let semantic = false;
+let fields = "full";
 
 before(async () => {
   root = tempRoot();
   const provider = process.env.PI_GOTCHA_EMBEDDINGS === "local" ? "local" : "off";
   runtime = runtimeFor(root, { embeddings: { provider, model: "Xenova/all-MiniLM-L6-v2" } } as never);
+  // The lean arm indexes only what 1.0 indexed (summary, aliases, paths, body), so the value of
+  // trigger and the evidence fields is measured rather than assumed.
+  const lean = process.env.GOTCHA_BENCH_FIELDS === "lean";
   for (const gotcha of GOTCHAS) {
     runtime.store.add({
       summary: gotcha.summary,
-      expected: "fixture expectation",
-      actual: "fixture outcome",
+      expected: lean ? "fixture expectation" : ((gotcha as any).expected ?? "fixture expectation"),
+      actual: lean ? "fixture outcome" : ((gotcha as any).actual ?? "fixture outcome"),
+      trigger: lean ? "" : ((gotcha as any).trigger ?? ""),
       paths: gotcha.paths,
       aliases: gotcha.aliases,
       body: gotcha.body,
     });
   }
+  fields = lean ? "lean" : "full";
   if (provider === "local") {
     await refreshSemantic(runtime);
     semantic = runtime.semantic.ready;
@@ -87,7 +93,7 @@ function pct(part: number, whole: number): string {
 describe(`retrieval @${AT}`, () => {
   test("recall by query kind, and what the relevance floor removes", async () => {
     const outcomes = await evaluate();
-    const mode = semantic ? "lexical + embeddings" : "lexical only";
+    const mode = `${semantic ? "lexical + embeddings" : "lexical only"}, ${fields} fields`;
 
     const rows = [
       `\n  retrieval @${AT} — ${mode}`,

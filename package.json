@@ -27,7 +27,8 @@
     "test": "node --test 'test/*.test.ts'",
     "bench": "node --test test/retrieval.bench.ts",
     "floors": "node --test test/floor.bench.ts",
-    "eval": "node eval/tool-use.mjs"
+    "eval": "node eval/tool-use.mjs",
+    "eval:session": "node eval/from-session.mjs"
   },
   "devDependencies": {
     "@huggingface/transformers": "^4.2.0"

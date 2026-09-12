@@ -19,6 +19,7 @@ const ADD = {
   summary: SAMPLE.summary,
   expected: SAMPLE.expected,
   actual: SAMPLE.actual,
+  trigger: SAMPLE.trigger,
   paths: SAMPLE.paths,
   aliases: SAMPLE.aliases,
   body: SAMPLE.body,
@@ -29,6 +30,7 @@ const OTHER = {
   summary: "Session cookies are dropped on redirect unless SameSite is set to none explicitly",
   expected: "The login cookie to survive the redirect back from the identity provider",
   actual: "The cookie never reached the browser, and only behind the proxy, with no error",
+  trigger: "debugging a login that works locally but not behind the proxy",
   aliases: ["auth", "login"],
 };
 
@@ -98,6 +100,20 @@ describe("what counts as a gotcha", () => {
       assert.equal(active.store.list().length, 1);
     });
   }
+
+  test("refuses without a trigger, which is what makes it findable", async () => {
+    const active = runtime();
+    const result = await runGotchaTool(active, { ...ADD, trigger: "" });
+    assert.match(result.text, /needs a `trigger`/);
+    assert.equal(active.store.list().length, 0);
+  });
+
+  test("the trigger is stored and shown when read", async () => {
+    const active = runtime();
+    const id = idFromResult((await runGotchaTool(active, ADD)).text);
+    assert.equal(active.store.get(id)?.trigger, SAMPLE.trigger);
+    assert.match((await runGotchaTool(active, { action: "read", id })).text, /Comes up when: chasing rows/);
+  });
 
   test("refuses a summary too vague to find again", async () => {
     const active = runtime();

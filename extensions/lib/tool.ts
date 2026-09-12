@@ -22,6 +22,13 @@ export const TOOL_PARAMETERS = {
       type: "string",
       description: "add, update: what actually happened, and how you found out.",
     },
+    trigger: {
+      type: "string",
+      description:
+        "add, update: the work someone will be doing when they next need this, as a task — " +
+        '"adding a column to the orders table", "chasing duplicate confirmation emails". This is ' +
+        "how the gotcha gets found later, so write the situation, not the fact.",
+    },
     paths: {
       type: "array",
       items: { type: "string" },
@@ -53,13 +60,13 @@ export const TOOL_DESCRIPTION =
   "relevant gotchas also arrive unasked when you touch the files they cover. " +
   "add one ONLY when something surprised you and would surprise the next session the same way. " +
   "Before adding, answer two questions: would someone find this by reading the code (then do not " +
-  "add it), and what will someone be doing when they next need it (say that in the aliases). " +
+  "add it), and what will someone be doing when they next need it (that is the trigger). " +
   "\n\nRECORD, for example: " +
   '{ action: "add", summary: "Invoice totals are integer cents; the CSV export drops any line ' +
   'containing a comma", expected: "the export to show the formatted total like every other ' +
   'column", actual: "the row vanished with no error at all; the parser treats a comma as ' +
-  'corruption", paths: ["src/billing/"], aliases: ["money formatting", "thousands separator", ' +
-  '"missing rows in export"] }' +
+  'corruption", trigger: "chasing rows missing from a finance export", paths: ["src/billing/"], ' +
+  'aliases: ["money formatting", "thousands separator", "missing rows in export"] }' +
   "\n\nDO NOT RECORD: \"I changed the retry count from 3 to 2\" (what you did, not what surprised " +
   'you), "the user prefers tabs" (a preference), "TODO: revisit the cache key" (a plan), ' +
   '"getUser returns null when the id is unknown" (the code says so). ' +
@@ -197,6 +204,7 @@ export async function runGotchaTool(
           gotcha.summary,
           ``,
           `Covers: ${scope}`,
+          gotcha.trigger ? `Comes up when: ${gotcha.trigger}` : "",
           gotcha.aliases.length ? `Also known as: ${gotcha.aliases.join(", ")}` : "",
           `Expected: ${gotcha.expected}`,
           `Actually: ${gotcha.actual}`,
@@ -222,6 +230,7 @@ export async function runGotchaTool(
     const summary = String(params.summary ?? "").trim();
     const expected = String(params.expected ?? "").trim();
     const actual = String(params.actual ?? "").trim();
+    const trigger = String(params.trigger ?? "").trim();
     const aliases = Array.isArray(params.aliases) ? params.aliases.map(String).filter(Boolean) : [];
     const paths = Array.isArray(params.paths) ? params.paths.map(String).filter(Boolean) : [];
     const body = String(params.body ?? "");
@@ -265,6 +274,14 @@ export async function runGotchaTool(
           "for instead of your wording. Without them this will not be found again.",
       };
     }
+    if (trigger.length < settings.minEvidence) {
+      return {
+        text:
+          "add needs a `trigger`: the work someone will be doing when they next need this, as a " +
+          'task rather than a fact — "chasing rows missing from a finance export". That is what ' +
+          "makes it findable when it matters.",
+      };
+    }
 
     const duplicate = await findDuplicate(runtime, summary, aliases);
     if (duplicate) {
@@ -275,7 +292,7 @@ export async function runGotchaTool(
       };
     }
 
-    const draft: GotchaDraft = { summary, expected, actual, paths, aliases, body };
+    const draft: GotchaDraft = { summary, expected, actual, trigger, paths, aliases, body };
     const written = ledger.writesToday();
     const cap = ledger.capToday(settings.dailyWriteCap);
     const overBudget = written >= cap;
@@ -355,6 +372,7 @@ export async function runGotchaTool(
     if (typeof params.summary === "string") patch.summary = params.summary;
     if (typeof params.expected === "string") patch.expected = params.expected;
     if (typeof params.actual === "string") patch.actual = params.actual;
+    if (typeof params.trigger === "string") patch.trigger = params.trigger;
     if (typeof params.body === "string") patch.body = params.body;
     if (Array.isArray(params.paths)) patch.paths = params.paths.map(String);
     if (Array.isArray(params.aliases)) patch.aliases = params.aliases.map(String);

@@ -21,6 +21,7 @@ One markdown file per gotcha, YAML header plus body:
 | `aliases` | no | Other words for the same thing; retrieval leans on these |
 | `expected` | yes | What the author thought would happen |
 | `actual` | yes | What happened instead, and how they found out |
+| `trigger` | yes | The work someone will be doing when they next need it, as a task |
 | `created` / `updated` | auto | Dates |
 
 One file per gotcha so concurrent additions on different devices merge without conflict. Malformed files are skipped rather than fatal. `list()` is cached behind `signature()`, which stats rather than parses, because it runs on every tool call.
@@ -41,7 +42,9 @@ Ranking is hybrid: MiniSearch (BM25, fuzzy, prefix) over summary, aliases, paths
 
 BM25 is a fraction of the query's own term mass, so it shrinks as the query grows and can't be compared against a constant; what is stable is how far the top result stands out from the best result that wouldn't have been shown anyway (`standout`, 1.4). Cosine over normalized vectors is bounded and comparable, so an absolute floor is meaningful (`semanticFloor`, 0.55).
 
-`prune()`, used by search, keeps what either channel is confident about (cosine ≥ 0.45, or BM25 ≥ 35% of the top hit) and uses cosine only to veto the plainly unrelated (`searchVeto`, 0.15). From `npm run floors`: cosine alone reaches full silence at 0.25 and costs 8 of 40 recall; this rule holds 30 of 40 with every unanswerable query silenced.
+`prune()`, used by search, keeps what either channel is confident about (cosine ≥ 0.45, or BM25 ≥ 35% of the top hit) and uses cosine only to veto the plainly unrelated (`searchVeto`, 0.20). From `npm run floors`: cosine alone reaches full silence at 0.25 and costs 6 of 40 recall; the either-channel rule reaches it at 0.20 while holding 33 of 40.
+
+That operating point is a function of what gets embedded, not a constant. It was 0.15 when the vectors held only the summary and aliases; adding `trigger` and the evidence pair shifted the whole cosine distribution, and the sweep had to be re-run to find the new knee. Re-run it after changing what is indexed.
 
 A ratio can't discriminate on a store too small to have rivals, so an unsolicited gotcha must also share a non-stopword with the prompt whenever embeddings are unavailable.
 
@@ -128,7 +131,7 @@ Usage counts are what make this evidence-based: surfaced many times and never op
   "maxPathSurfacedPerTurn": 3,
   "standout": 1.4,
   "semanticFloor": 0.55,
-  "searchVeto": 0.15,
+  "searchVeto": 0.2,
   "dailyWriteCap": 5,
   "duplicateThreshold": 0.55,
   "duplicateOverlap": 0.35,
@@ -150,12 +153,14 @@ Usage counts are what make this evidence-based: surfaced many times and never op
 - `npm run floors` — the recall-against-silence curve behind the default floor.
 - `npm run eval` — a live model against the real tool schema and description: ten scenarios, five worth recording and five not. It scores the model's judgement *and* what the deterministic guards did with each attempt, which is the number that matters. Point it anywhere with `GOTCHA_EVAL_URL` / `GOTCHA_EVAL_MODEL`.
 
-Measured against Gemma 4 12B (a deliberately weak model, llama.cpp, temperature 0): 10/10 decisions correct, 5/5 worth-recording stored, 0 junk attempted, 4 aliases on every write. That run is also what caught the junk patterns rejecting a real finding.
+- `npm run eval:session` — the same measurement over sixteen episodes from building this package, real and unlabelled, ten worth recording and six not.
+
+Measured against Gemma 4 12B (a deliberately weak model, llama.cpp, temperature 0): 10/10 decisions on the synthetic scenarios and 16/16 on the session episodes, everything worth recording stored, nothing junk attempted, and a usable trigger on every write. The scenario run is also what caught the junk patterns rejecting a real finding.
 
 ## Known limits
 
 - **Path extraction is best-effort.** A path built from a shell variable is missed, as is a new file at the project root. Both are asserted as tests rather than papered over.
-- **Paraphrase recall is 42%** of delivered results in both modes; aliases are the mitigation.
+- **Paraphrase recall is 75%** with embeddings and 42% without; the `trigger` field carries most of that difference.
 - **Typos cost recall**: fuzzy matching handles one-word slips, not `"stipe webhok retrys"`.
 - **The floor is tuned on a synthetic corpus** of 30 gotchas; re-run `npm run floors` against a real store.
 - **Junk detection is wording-based.** A preference dressed up as a finding will pass; the daily budget, usage counts and review command are the backstop. It cuts the other way too: a 12B once had a real gotcha rejected because its summary contained "(like formatted currency)", which is why the patterns now require a person doing the preferring. Re-run `npm run eval` after touching them.

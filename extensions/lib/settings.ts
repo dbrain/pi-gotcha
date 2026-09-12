@@ -38,7 +38,7 @@ export const DEFAULTS: Settings = {
   maxPathSurfacedPerTurn: 3,
   standout: 1.4,
   semanticFloor: 0.55,
-  searchVeto: 0.15,
+  searchVeto: 0.2,
   dailyWriteCap: 5,
   duplicateThreshold: 0.55,
   duplicateOverlap: 0.35,

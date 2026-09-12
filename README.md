@@ -55,6 +55,7 @@ paths: [src/billing/, src/export/csv.ts]
 aliases: [money formatting, currency, amounts, thousands separator]
 expected: The export to contain the formatted total like every other column
 actual: The row vanished with no error; the parser treats a comma as corruption
+trigger: chasing rows missing from a finance export
 created: 2026-09-12
 ---
 
@@ -65,6 +66,9 @@ created: 2026-09-12
 - `paths` is what the gotcha covers: files, directory prefixes, or empty for project-wide. Repo-wide knowledge is fine — scoping something at the repo root moves it to the relevance channel rather than surfacing it on every file you touch.
 - `aliases` are the other words someone might search for, written once at record time.
 - `expected` and `actual` are the bar for recording anything at all. A preference or a note about what you just did has nothing to put in them.
+- `trigger` is the work you'll be doing when you next need this, phrased as a task. It's a concrete question a model can answer well, and it's written in the language searches actually use — which is why it carries most of the paraphrase recall.
+
+Everything except `paths` feeds retrieval: `summary` and `aliases` and `trigger` weighted highest, then the evidence pair, then the body.
 
 One file per gotcha, so two devices adding gotchas produce no merge conflict.
 
@@ -90,15 +94,17 @@ See [DESIGN.md](DESIGN.md) for how ranking, storage and surfacing actually work,
 | Query kind | Keyword only | With embeddings |
 | --- | --- | --- |
 | Wording overlaps the stored summary | 8/8 | 8/8 |
-| Mentions a file or directory | 5/5 | 5/5 |
-| Phrased as the task being worked on | 10/10 | 9/10 |
-| Typos and misspellings | 3/5 | 3/5 |
-| Paraphrased, no shared vocabulary | 5/12 | 5/12 |
-| **Unanswerable (should return nothing)** | **0/5 silent** | **5/5 silent** |
+| Mentions a file or directory | 5/5 | 4/5 |
+| Phrased as the task being worked on | 9/10 | 8/10 |
+| Typos and misspellings | 4/5 | 4/5 |
+| **Paraphrased, no shared vocabulary** | 5/12 | **9/12** |
+| **Unanswerable (should return nothing)** | 0/5 silent | **5/5 silent** |
 
-**What embeddings actually buy is silence, not recall.** Raw paraphrase recall does improve, 42% to 58%, but the relevance floor trims it back to 42%, and one task query is lost. What changes decisively is the last row: keyword ranking always returns its best three guesses however bad they are, so every unanswerable query gets confident-looking junk. Only cosine similarity can say "nothing here is about this". If you don't care about that, keyword-only costs nothing and is 2 results behind over the whole corpus.
+**Asking for a `trigger` is what fixed paraphrase.** Delivered paraphrase recall was 42% in both modes while only the summary and aliases were indexed. Recording the work someone will be doing when they need the gotcha — and indexing it along with the expected/actual pair — took it to 75%, and raw recall from 31/40 to 36/40. The gain arrives through the embeddings, not the keyword index: the trigger is written in the language searches actually use.
 
-Paraphrase is the standing weakness either way: "why is the invoice total coming out one hundred times too big" still does not reach a gotcha whose summary says "integer cents". Aliases are the mitigation, which is why the tool asks for them on every write.
+**Embeddings still buy silence.** Keyword ranking always returns its best three guesses however bad they are, so every unanswerable query gets confident-looking junk; only cosine can say "nothing here is about this". Keyword-only remains a real option — it wins one file query and one task query — but it is paraphrase-blind.
+
+The floor costs one task query and one path query, which is the price of that silence. `npm run floors` prints the curve, and the operating point moved once `trigger` joined the embedded text, so re-run it after changing what is indexed.
 
 `npm run floors` prints the recall-against-silence curve that set the default floor.
 
@@ -116,6 +122,12 @@ Against **Gemma 4 12B** (chosen as a deliberately weak model), temperature 0:
 | Aliases written | 4 on every record |
 
 It skipped the preference, the task log, the plan, the thing the code already said, and the thing that worked as documented — without any guard needing to fire.
+
+`npm run eval:session` is the harder version: sixteen episodes from actually building this package, unlabelled and in the order they happened — ten things that cost real investigation (Node's type stripping rejecting constructor parameter properties, a dependency that builds from source and dies, a template renderer parsing JSON before substituting, an install script clobbering environment overrides) mixed with six pieces of ordinary work (ran the tests, wrote a README section, pushed a commit).
+
+Same model: **16/16 decisions correct, 10/10 worth recording stored, zero false positives.** The triggers it wrote were genuinely useful — "debugging why a subagent cannot access a tool that is available to the parent agent" — though one misread its episode, and its summaries run a little generic next to a human's.
+
+Two caveats. A human wrote those episode summaries from the session, so it is real material filtered through one person's compression; a raw transcript would be harder. And both evals are single-turn, where a real session asks the same judgement 40k tokens deep.
 
 The run earned its keep in another way: the first pass had one genuine gotcha **rejected by my own junk filter**, because the model wrote "(like formatted currency)" and the preference pattern matched the word "like". The patterns now require a person doing the preferring, and that summary is a regression test.
 

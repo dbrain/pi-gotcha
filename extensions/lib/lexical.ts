@@ -6,13 +6,18 @@ export interface Scored {
   score: number;
 }
 
-const FIELD_BOOST = { summary: 3, aliases: 3, paths: 1.5, body: 1 };
+/* `trigger` is the work someone will be doing when they need this, so it matches how a query is
+   actually phrased; `expected` and `actual` carry the concrete vocabulary — real error text,
+   real symptoms — that a later search is likely to reuse. */
+const FIELD_BOOST = { summary: 3, aliases: 3, trigger: 3, evidence: 2, paths: 1.5, body: 1 };
 
 function documentOf(gotcha: Gotcha) {
   return {
     id: gotcha.id,
     summary: gotcha.summary,
     aliases: gotcha.aliases.join(" "),
+    trigger: gotcha.trigger,
+    evidence: `${gotcha.expected} ${gotcha.actual}`,
     paths: gotcha.paths.join(" "),
     body: gotcha.body,
   };
@@ -21,7 +26,7 @@ function documentOf(gotcha: Gotcha) {
 export function buildIndex(gotchas: Gotcha[]): MiniSearch {
   const index = new MiniSearch({
     idField: "id",
-    fields: ["summary", "aliases", "paths", "body"],
+    fields: ["summary", "aliases", "trigger", "evidence", "paths", "body"],
     storeFields: ["id"],
   });
   index.addAll(gotchas.map(documentOf));

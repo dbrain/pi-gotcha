@@ -1,9 +1,12 @@
-export type Gotcha = { id: string; summary: string; paths: string[]; aliases: string[]; body: string };
+export type Gotcha = { id: string; summary: string; paths: string[]; aliases: string[]; body: string; expected: string; actual: string; trigger: string };
 export type Query = { query: string; expected: string[]; kind: "verbatim" | "synonym" | "typo" | "path" | "task" | "distractor" };
 
 export const GOTCHAS: Gotcha[] = [
   {
     id: "billing-amounts-integer-cents",
+    expected: "Handing 12.99 to the repository layer would store a dollars-and-cents value like any other decimal field.",
+    actual: "The row came back holding 12 or 1299 depending on the driver's coercion, with no validation error, and two incidents traced to helpers that skipped the serializer.",
+    trigger: "adding a helper that writes an *_amount column",
     summary: "Money is persisted as integer cents below the API boundary; handing the same field a float dollar value inflates the charge by two orders of magnitude.",
     paths: ["src/billing/money.ts"],
     aliases: ["dollars vs cents", "money type", "float amounts", "decimal precision"],
@@ -11,6 +14,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "refund-rounding-exceeds-charge",
+    expected: "Refunding the remaining lines of an order would add back up to exactly what was captured.",
+    actual: "Half-up rounding per line pushed the total a unit or two over the capture and the gateway answered with a generic 400 that surfaced as an unhelpful refund-failed message.",
+    trigger: "issuing a second partial refund on an order",
     summary: "Partial refunds recompute tax per line item, so repeated partial refunds can round up past the original captured amount and the gateway rejects the last one.",
     paths: ["src/billing/refunds.ts"],
     aliases: ["banker's rounding", "tax recalculation", "refund larger than payment", "half-up"],
@@ -18,6 +24,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "stripe-webhook-out-of-order",
+    expected: "Provider events would land in the order they happened, so processing them as they arrive is safe.",
+    actual: "A stale created event still being retried three days later landed after the deletion event and brought a cancelled subscription back to life.",
+    trigger: "writing a handler for a provider callback",
     summary: "Payment webhooks are not ordered and can be redelivered days later, so handlers that trust arrival order will resurrect a cancelled subscription.",
     paths: ["src/billing/webhooks/"],
     aliases: ["event replay", "idempotency key", "redelivery", "provider callbacks"],
@@ -25,6 +34,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "downgrade-proration-negative-invoice",
+    expected: "A proration credit bigger than the next charge would simply carry as a credit on the invoice.",
+    actual: "The provider refused the negative total as invalid and the customer's entire billing run failed silently until someone read the dead-letter queue.",
+    trigger: "moving a customer from annual to monthly",
     summary: "Mid-cycle plan downgrades emit a credit line that can make the next invoice total negative, which the payment provider refuses to charge at all.",
     paths: ["src/billing/subscriptions.ts"],
     aliases: ["proration credit", "plan change", "credit balance", "negative total"],
@@ -32,6 +44,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "session-cookie-leading-dot-subdomains",
+    expected: "A session established on the staging host would stay separate from the production one.",
+    actual: "The dotted domain covers every host on the apex, so testers returning to production were logged out or left carrying a staging identity.",
+    trigger: "standing up a new preview environment",
     summary: "The session cookie domain has a leading dot, so every subdomain shares it and a staging login silently overwrites the production session in the same browser.",
     paths: ["src/auth/session.ts"],
     aliases: ["cookie domain", "subdomain scope", "staging leaks into prod", "shared cookie"],
@@ -39,6 +54,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "secure-cookie-dropped-behind-proxy",
+    expected: "Secure cookies would be set normally once TLS was terminated in front of the app.",
+    actual: "The framework saw the request as plain HTTP and never set the cookie, producing a redirect loop at login that reproduced in staging and never locally.",
+    trigger: "adding an ingress controller or sidecar hop",
     summary: "Behind a TLS-terminating proxy the app sees plain HTTP, so Secure cookies are never set and login appears to succeed then immediately bounces back.",
     paths: [],
     aliases: ["trust proxy", "x-forwarded-proto", "load balancer", "login loop"],
@@ -46,6 +64,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "jwt-verify-clock-skew-leeway",
+    expected: "Verification would reject a credential the moment it passed its expiry.",
+    actual: "Sixty seconds of leeway left behind after an NTP fix kept expired credentials usable, which also shows up as flaky tests asserting rejection at the boundary.",
+    trigger: "implementing hard revocation for a credential",
     summary: "Token verification is configured with sixty seconds of leeway, so a credential stays usable briefly after it expires and after it is revoked.",
     paths: ["src/auth/jwt.ts"],
     aliases: ["clock skew", "leeway", "nbf exp validation", "token expiry"],
@@ -53,6 +74,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "impersonation-audit-logs-wrong-actor",
+    expected: "The audit row would name the staff member who performed the action while impersonating.",
+    actual: "The middleware swaps the principal before the audit hook reads it, so a compliance review found a record deleted by a customer who was asleep at the time.",
+    trigger: "adding a new audit log write",
     summary: "Support impersonation swaps the request principal, so the audit trail records the impersonated customer as the actor and the real staff member disappears.",
     paths: [],
     aliases: ["support login as", "audit trail", "actor attribution", "who did this"],
@@ -60,6 +84,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "migration-concurrent-index-transaction",
+    expected: "A concurrent index build would run like any other migration step.",
+    actual: "The runner's transaction wrapper made it abort with an unhelpful error and left the deploy stopped halfway through.",
+    trigger: "building an index on a large table",
     summary: "The migration runner wraps every step in a transaction, so CREATE INDEX CONCURRENTLY aborts with an unhelpful error and the deploy fails halfway.",
     paths: ["db/migrations/"],
     aliases: ["non-transactional migration", "index build", "lock free index", "schema change fails"],
@@ -67,6 +94,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "migration-rename-breaks-rolling-deploy",
+    expected: "The rename would take effect cleanly the moment the migration finished.",
+    actual: "Old pods kept querying the old shape for the eight minutes the rollout took and threw a burst of 500s, with no forward path once someone tried to roll back.",
+    trigger: "renaming or dropping a live column",
     summary: "During a rolling deploy old and new pods run at once, so renaming or dropping a column breaks the still-running old version until the rollout finishes.",
     paths: ["db/migrations/"],
     aliases: ["expand contract", "backwards compatible schema", "rollout skew", "two versions live"],
@@ -74,6 +104,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "cache-key-missing-tenant-id",
+    expected: "Record ids are unique per table, so keying the cache on the id alone is enough.",
+    actual: "The legacy import left ids overlapping across organisations and one org read a payload that had been cached for another.",
+    trigger: "caching a record lookup",
     summary: "Cache keys are built from the record id alone, so two organisations holding the same id read each other's cached payloads.",
     paths: ["src/cache/keys.ts"],
     aliases: ["multi tenant", "key namespace", "cross account leak", "shared key prefix"],
@@ -81,6 +114,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "cdn-caches-authenticated-pages",
+    expected: "Only the marketing routes would ever be stored at the edge.",
+    actual: "A route mounted outside the middleware went out with no cache-control, so the edge kept the per-user render and replayed it to the next visitor.",
+    trigger: "mounting a route outside the auth middleware",
     summary: "Responses without an explicit Vary and private directive get stored at the edge, so a signed-in page can be served to the next anonymous visitor.",
     paths: ["infra/cdn/"],
     aliases: ["edge cache", "vary header", "public private directive", "shared cache"],
@@ -88,6 +124,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "feature-flags-memoized-per-process",
+    expected: "Flipping a flag would take effect on the next request that reads it.",
+    actual: "Module-scope memoisation with no time-to-live left long-lived workers serving a value weeks old, so the kill switch killed nothing.",
+    trigger: "shipping an emergency kill switch",
     summary: "Flag values are memoised in module scope on first read, so changing a flag in the dashboard does nothing until every process is recycled.",
     paths: [],
     aliases: ["feature flag", "stale config", "module scope cache", "rollout not applied"],
@@ -95,6 +134,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "cache-stampede-after-deploy-flush",
+    expected: "A release would warm its cache back up gradually as traffic came in.",
+    actual: "Versioning the namespace by build sha emptied it all at once and a thousand concurrent readers of one key issued a thousand identical queries against Postgres.",
+    trigger: "putting an expensive query behind the cache",
     summary: "The cache namespace is versioned by build sha, so every release starts completely cold and thousands of uncoalesced reads hit Postgres simultaneously.",
     paths: ["src/cache/"],
     aliases: ["thundering herd", "dogpile", "cold start", "request coalescing"],
@@ -102,6 +144,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "ci-cache-key-ignores-node-version",
+    expected: "Bumping the runtime would rebuild whatever needed rebuilding.",
+    actual: "The cache key hashes only the lockfile, so restored native modules were still compiled against the old runtime and the job died with segfaults and missing-symbol errors in a package nobody had touched.",
+    trigger: "bumping the runtime version in CI",
     summary: "The CI dependency cache key hashes only the lockfile, so bumping the runtime reuses native modules compiled against the previous one and tests fail bizarrely.",
     paths: [".github/workflows/ci.yml"],
     aliases: ["build cache key", "native addon", "stale artifacts", "runtime upgrade"],
@@ -109,6 +154,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "build-time-env-vars-inlined",
+    expected: "Editing a client variable in the hosting dashboard would apply after a restart.",
+    actual: "The old value was already a string literal in the shipped bundle and nothing changed until a full rebuild and deploy went out.",
+    trigger: "rotating a public key or endpoint",
     summary: "Client environment variables are substituted into the bundle at build time, so changing one in the hosting dashboard has no effect until a rebuild runs.",
     paths: ["vite.config.ts"],
     aliases: ["static replacement", "frontend config", "rebuild required", "bundler define"],
@@ -116,6 +164,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "ci-retries-mask-test-order-dependency",
+    expected: "A spec that passes on the second attempt was just infrastructure noise.",
+    actual: "The retry runs that file alone, so state another file had left in the shared seed database was never present again and the job went green over a real ordering bug.",
+    trigger: "chasing a spec that only fails in CI",
     summary: "CI reruns only the failed file on retry, so tests that leak state pass on the second attempt and the real ordering bug is never surfaced.",
     paths: [],
     aliases: ["flaky retry", "shared fixture pollution", "green on rerun", "test isolation"],
@@ -123,6 +174,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "migrations-race-on-pod-boot",
+    expected: "The advisory lock taken in the entrypoint serialises migration runs across replicas.",
+    actual: "The lock wait is shorter than a slow migration, so the waiting replicas exited non-zero on duplicate-object errors and crashlooped while the leader was still working.",
+    trigger: "shipping a long-running migration",
     summary: "Every pod runs pending migrations on startup, so a rollout with several replicas races and the losers crashloop on duplicate-object errors.",
     paths: ["scripts/entrypoint.sh"],
     aliases: ["startup hook", "advisory lock", "duplicate object error", "crashloop on deploy"],
@@ -130,6 +184,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "csv-bom-breaks-first-header",
+    expected: "The header names in the file match the expected strings exactly.",
+    actual: "An invisible byte order mark was glued to the first header, so it compared unequal, the field was undefined on every row, and the import reported success with one blank column.",
+    trigger: "mapping headers in an upload parser",
     summary: "Uploaded CSVs often start with a UTF-8 byte order mark, which becomes part of the first header name so that column silently never maps.",
     paths: ["src/import/csv.ts"],
     aliases: ["byte order mark", "invisible prefix", "header mismatch", "first column missing"],
@@ -137,6 +194,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "excel-mangles-ids-and-dates",
+    expected: "An export can be opened, touched up and fed straight back through the importer.",
+    actual: "Autoformatting on the user's own machine had already stripped 007 down to 7 and rewritten 3-12 as a calendar value, so records that left intact came back corrupted.",
+    trigger: "designing a round-trip export format",
     summary: "Spreadsheet software coerces numeric-looking identifiers when a CSV is loaded, turning 007 into 7 and 3-12 into a calendar value unless each cell is forced to text.",
     paths: [],
     aliases: ["autoformat", "scientific notation", "text qualifier", "id truncation"],
@@ -144,6 +204,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "partner-uploads-are-latin1",
+    expected: "Decoding with the charset the file declares gives back the right characters.",
+    actual: "Two partners emit Latin-1 while declaring UTF-8, and accented customer names arrived as mojibake that nobody noticed until support forwarded a record.",
+    trigger: "adding an encoding entry for a supplier",
     summary: "Two partner feeds are emitted as Latin-1 despite declaring UTF-8, so decoding by the declared charset produces mojibake in customer names.",
     paths: ["src/import/partners/"],
     aliases: ["mojibake", "charset detection", "windows-1252", "accented characters"],
@@ -151,6 +214,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "report-boundaries-use-server-timezone",
+    expected: "Buckets would be cut on the zone stored against the account.",
+    actual: "Truncation runs on the UTC database session zone while the UI labels the result in the viewer's zone, so the first and last bucket of every range came out wrong for distant accounts.",
+    trigger: "aggregating rows into daily buckets",
     summary: "Daily report buckets are cut on the server's own clock rather than each account's configured zone, so figures shift by a day for anyone far from UTC.",
     paths: ["src/reports/daily.ts"],
     aliases: ["day boundary", "account locale", "bucket cutoff", "utc offset"],
@@ -158,6 +224,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "cron-dst-duplicate-and-skipped-runs",
+    expected: "A job pinned to a local hour runs exactly once every day of the year.",
+    actual: "The repeated autumn hour fired it a second time and the spring hour that does not exist skipped it entirely, doubling a non-idempotent side effect.",
+    trigger: "pinning a schedule to a local hour",
     summary: "Jobs pinned to a local hour in a daylight-saving zone execute twice or not at all on the two transition days each year.",
     paths: ["src/jobs/scheduler.ts"],
     aliases: ["daylight saving", "scheduler drift", "repeated execution", "missed window"],
@@ -165,6 +234,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "date-only-parsed-as-utc-midnight",
+    expected: "A bare calendar string stays the same calendar day wherever it is rendered.",
+    actual: "It parsed as midnight UTC and rendered in local time, shifting birthdays and invoice periods a day earlier for everyone west of UTC.",
+    trigger: "parsing a date-only field",
     summary: "A bare YYYY-MM-DD string parses as midnight UTC and then renders in local time, so users west of UTC see the previous day everywhere.",
     paths: ["src/utils/date.ts"],
     aliases: ["off by one day", "calendar value", "iso string parsing", "local rendering"],
@@ -172,6 +244,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "inventory-reserve-lost-update",
+    expected: "Doing the read and the write inside one transaction stops reservations colliding.",
+    actual: "Read-committed let the statements interleave and availability went negative within seconds of a launch, having never once shown up under normal traffic.",
+    trigger: "writing a stock reservation path",
     summary: "Stock reservation reads the count and writes it back without a row lock, so simultaneous checkouts can both succeed and push availability negative.",
     paths: ["src/inventory/reserve.ts"],
     aliases: ["lost update", "oversell", "read modify write", "row contention"],
@@ -179,6 +254,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "queue-delivers-at-least-once",
+    expected: "A message on the queue is handed to exactly one worker and run once.",
+    actual: "A handler that overran the visibility timeout had its message given to a second worker mid-flight, which sent duplicate mail and on one occasion issued two payouts.",
+    trigger: "writing a worker with an external side effect",
     summary: "The worker runtime guarantees at-least-once delivery, so any handler without an idempotency guard re-runs its side effects after a visibility timeout.",
     paths: [],
     aliases: ["duplicate delivery", "redelivery", "exactly once myth", "side effects repeat"],
@@ -186,6 +264,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "retry-after-header-can-be-a-date",
+    expected: "Retry-After is a count of seconds you can convert to a number and sleep on.",
+    actual: "Some edge nodes send an HTTP date instead, the integer conversion produced NaN or zero, and the collapsed backoff got the key temporarily banned.",
+    trigger: "implementing backoff for a throttled call",
     summary: "The rate-limit response sometimes carries Retry-After as an HTTP date rather than seconds, and parsing it as a number yields zero so the client retries instantly.",
     paths: ["src/clients/partner.ts"],
     aliases: ["429 backoff", "throttling header", "retry storm", "header format"],
@@ -193,6 +274,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "vendor-returns-200-on-error",
+    expected: "A 200 back from the integration means the call did what it said.",
+    actual: "One provider answers 200 with an errors array and another 200 with accepted false, so code branching on response.ok logged success and a batch of undelivered mail sat unnoticed for a week.",
+    trigger: "writing a wrapper around an integration",
     summary: "Several third-party integrations answer with HTTP 200 and an error object in the body, so status-code-only error handling treats failures as successes.",
     paths: [],
     aliases: ["soft error", "body level status", "silent failure", "misleading status code"],
@@ -200,6 +284,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "tsconfig-paths-unresolved-at-runtime",
+    expected: "An aliased import that type-checks and runs under the dev server will run once deployed.",
+    actual: "The compiler erases the alias and Node does not honour it, so the deployed process threw MODULE_NOT_FOUND from a script the build step never rewrote.",
+    trigger: "loading a module outside the bundler",
     summary: "Path aliases in tsconfig are erased by the compiler and not honoured by Node, so aliased imports type-check cleanly then throw MODULE_NOT_FOUND once deployed.",
     paths: ["tsconfig.json"],
     aliases: ["import alias", "resolver mismatch", "works in dev only", "compiled output"],
@@ -207,6 +294,9 @@ export const GOTCHAS: Gotcha[] = [
   },
   {
     id: "esm-default-interop-undefined",
+    expected: "The default import lines up with the type definitions the package ships.",
+    actual: "Under the CommonJS build the real value sat on a nested default property, so the import was undefined and it blew up at the first call rather than at load.",
+    trigger: "consuming a dual-published package",
     summary: "Dual-published packages expose their default export differently under the two module systems, so a default import can arrive as undefined with no build error.",
     paths: [],
     aliases: ["interop", "named export missing", "require of esm", "dual package hazard"],

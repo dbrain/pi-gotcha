@@ -38,10 +38,13 @@ before(async () => {
     embeddings: { provider: "local", model: "Xenova/all-MiniLM-L6-v2" },
   } as never);
   for (const gotcha of GOTCHAS) {
+    // Seeded exactly as the tool stores them, so the sweep measures the distribution the
+    // thresholds will actually face: trigger and evidence are part of the embedded text.
     runtime.store.add({
       summary: gotcha.summary,
-      expected: "fixture expectation",
-      actual: "fixture outcome",
+      expected: gotcha.expected,
+      actual: gotcha.actual,
+      trigger: gotcha.trigger,
       paths: gotcha.paths,
       aliases: gotcha.aliases,
       body: gotcha.body,
