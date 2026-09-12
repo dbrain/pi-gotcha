@@ -1,8 +1,8 @@
 import { prune } from "./rank.ts";
 import { byId, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./runtime.ts";
 import { scopeOf } from "./surfacing.ts";
-import { jaccard } from "./text.ts";
-import { MAX_SUMMARY, type Gotcha } from "./store.ts";
+import { jaccard, tokens } from "./text.ts";
+import { MAX_SUMMARY, type Gotcha, type GotchaDraft } from "./store.ts";
 
 export const TOOL_PARAMETERS = {
   type: "object",
@@ -45,24 +45,35 @@ export const TOOL_PARAMETERS = {
   required: ["action"],
 } as const;
 
+/* Small models follow a pattern far better than they follow a rule, so the contract is shown
+   rather than only stated: one example of each answer the tool can give. */
 export const TOOL_DESCRIPTION =
   "Hard-won project knowledge: things that cost real investigation and that reading the code does " +
   "not tell you. search it when you hit surprising behaviour or start work in an unfamiliar area; " +
   "relevant gotchas also arrive unasked when you touch the files they cover. " +
-  "add one ONLY when something surprised you and would surprise the next session the same way: " +
-  "a silent failure, an undocumented constraint, a value that must match something elsewhere. " +
-  "Every add states what you expected and what actually happened; if you cannot fill both in, it " +
-  "is not a gotcha. Do NOT record what the code shows, what a type says, what you just did, a " +
-  "preference you were told, or something that worked as documented. If the knowledge belongs at " +
-  "one line of code, write a comment there instead. Prefer update over add: a near-duplicate is " +
-  "refused. retire one when you find it is wrong.";
+  "add one ONLY when something surprised you and would surprise the next session the same way. " +
+  "Before adding, answer two questions: would someone find this by reading the code (then do not " +
+  "add it), and what will someone be doing when they next need it (say that in the aliases). " +
+  "\n\nRECORD, for example: " +
+  '{ action: "add", summary: "Invoice totals are integer cents; the CSV export drops any line ' +
+  'containing a comma", expected: "the export to show the formatted total like every other ' +
+  'column", actual: "the row vanished with no error at all; the parser treats a comma as ' +
+  'corruption", paths: ["src/billing/"], aliases: ["money formatting", "thousands separator", ' +
+  '"missing rows in export"] }' +
+  "\n\nDO NOT RECORD: \"I changed the retry count from 3 to 2\" (what you did, not what surprised " +
+  'you), "the user prefers tabs" (a preference), "TODO: revisit the cache key" (a plan), ' +
+  '"getUser returns null when the id is unknown" (the code says so). ' +
+  "If the knowledge belongs at one line of code, write a comment there instead. " +
+  "Prefer update over add: a near-duplicate is refused, and updating costs nothing.";
 
-/* A record of what someone did, or was told to prefer, is the commonest kind of junk a memory
-   store fills with, and it is recognisable from the wording alone. Cheaper to refuse here
-   than to ask a human to clean it up later. */
+/* Every pattern here has to name a person doing the preferring, planning or doing. Matching the
+   bare verbs rejected real findings: a live 12B wrote "rows with commas (like formatted
+   currency) are silently dropped" and `likes?` matched "like"; `prefers?` alone would reject
+   "the parser prefers UTF-8", and a bare "next time" would reject "the next time a pod boots". */
 const NOT_A_GOTCHA: Array<{ pattern: RegExp; why: string }> = [
   {
-    pattern: /\b(prefers?|likes?|wants?|asked (?:me|us) to|requested)\b/i,
+    pattern:
+      /\b(?:the\s+)?(?:user|users|team|client|reviewer|maintainer|they|he|she)\s+(?:prefers?|likes?|wants?|asked|requested|insists?)\b|\basked (?:me|us) to\b/i,
     why: "this reads as a preference someone stated, not something that surprised you",
   },
   {
@@ -70,7 +81,7 @@ const NOT_A_GOTCHA: Array<{ pattern: RegExp; why: string }> = [
     why: "this reads as a record of what you just did, not a durable constraint",
   },
   {
-    pattern: /\b(?:todo|next time|we should|remember to|don't forget)\b/i,
+    pattern: /\btodo\b|\bwe should\b|\bremember to\b|\bdon'?t forget\b|\bnext time (?:we|you|i) (?:should|need|must)\b/i,
     why: "this reads as a plan or reminder, not knowledge about how the system behaves",
   },
 ];
@@ -98,14 +109,33 @@ async function findDuplicate(runtime: Runtime, summary: string, aliases: string[
   return null;
 }
 
+// Today's writes first, because the most likely thing to drop is something recorded in the same
+// burst of work; then whatever else the store says is closest to the new one.
+async function replaceCandidates(runtime: Runtime, probe: string): Promise<Gotcha[]> {
+  const all = gotchas(runtime);
+  const index = byId(all);
+  const today = runtime.ledger
+    .writtenToday()
+    .map((id) => index.get(id))
+    .filter((gotcha): gotcha is Gotcha => Boolean(gotcha));
+
+  const seen = new Set(today.map((gotcha) => gotcha.id));
+  const ranked = (await hybridSearch(runtime, probe, 8))
+    .map((entry) => index.get(entry.id))
+    .filter((gotcha): gotcha is Gotcha => Boolean(gotcha) && !seen.has(gotcha.id));
+
+  return [...today, ...ranked].slice(0, 8);
+}
+
 export interface ToolResult {
   text: string;
 }
 
 export interface ToolContext {
-  // Present only where there is a human to ask: a background subagent gets no prompt, and so
-  // cannot spend budget the user did not approve.
+  // Present only where there is a human to ask. A background subagent has neither, so its
+  // writes become proposals instead of spending budget nobody approved.
   ask?: (question: string, detail: string) => Promise<boolean>;
+  choose?: (question: string, options: Array<{ label: string; value: string }>) => Promise<string | null>;
 }
 
 function refuseJunk(summary: string): string | null {
@@ -194,6 +224,7 @@ export async function runGotchaTool(
     const actual = String(params.actual ?? "").trim();
     const aliases = Array.isArray(params.aliases) ? params.aliases.map(String).filter(Boolean) : [];
     const paths = Array.isArray(params.paths) ? params.paths.map(String).filter(Boolean) : [];
+    const body = String(params.body ?? "");
 
     if (!summary) return { text: "add needs a summary." };
     if (summary.length > MAX_SUMMARY) {
@@ -203,7 +234,14 @@ export async function runGotchaTool(
     const junk = refuseJunk(summary);
     if (junk) return { text: junk };
 
-    const body = String(params.body ?? "");
+    if (tokens(summary).size < settings.minSummaryWords) {
+      return {
+        text:
+          "That summary is too vague to find again. State the specific thing that behaved " +
+          "unexpectedly and what it causes, in one line.",
+      };
+    }
+
     if (body.length > settings.maxBodyChars) {
       return {
         text:
@@ -228,24 +266,6 @@ export async function runGotchaTool(
       };
     }
 
-    const written = ledger.writesToday();
-    const cap = ledger.capToday(settings.dailyWriteCap);
-    if (written >= cap) {
-      const approved =
-        settings.overBudgetPrompt && context.ask
-          ? await context.ask(`Record a ${written + 1}th gotcha today? The budget is ${cap}.`, summary)
-          : false;
-      if (!approved) {
-        return {
-          text:
-            `${written} gotchas were already recorded today, which is the budget across all ` +
-            "sessions and subagents. Updating an existing gotcha is always allowed and does not " +
-            "spend budget, so prefer that. The user can raise today's budget with /gotchas-budget.",
-        };
-      }
-      ledger.recordOverride();
-    }
-
     const duplicate = await findDuplicate(runtime, summary, aliases);
     if (duplicate) {
       return {
@@ -255,10 +275,72 @@ export async function runGotchaTool(
       };
     }
 
-    const created = store.add({ summary, expected, actual, paths, aliases, body });
-    ledger.recordWrite();
+    const draft: GotchaDraft = { summary, expected, actual, paths, aliases, body };
+    const written = ledger.writesToday();
+    const cap = ledger.capToday(settings.dailyWriteCap);
+    const overBudget = written >= cap;
+    const needsReview = settings.reviewWrites === "always" || (settings.reviewWrites === "over-budget" && overBudget);
+
+    if (needsReview && !context.choose) {
+      const proposed = store.propose(draft);
+      return {
+        text:
+          `Proposed ${proposed.id} rather than recording it: ${overBudget ? "today's budget is spent" : "writes are reviewed here"} ` +
+          "and there is no one to ask in this session. A human resolves it with /gotchas-proposals.",
+      };
+    }
+
+    if (needsReview && context.choose) {
+      const question = overBudget
+        ? `Record a ${written + 1}th gotcha today? The budget is ${cap}.`
+        : "Record this gotcha?";
+      const picked = await context.choose(`${question}\n${summary}`, [
+        { label: overBudget ? "Record it anyway" : "Record it", value: "record" },
+        { label: "Replace an existing gotcha…", value: "replace" },
+        { label: "Skip it", value: "skip" },
+      ]);
+
+      if (picked === null || picked === "skip") return { text: "Not recorded; the user skipped it." };
+
+      if (picked === "replace") {
+        const candidates = await replaceCandidates(runtime, `${summary} ${aliases.join(" ")}`);
+        if (!candidates.length) return { text: "Nothing to replace; not recorded." };
+        const todayIds = new Set(ledger.writtenToday());
+        const chosen = await context.choose(
+          "Which gotcha should this replace?",
+          candidates.map((candidate) => ({
+            label: `${candidate.id} — ${candidate.summary}${todayIds.has(candidate.id) ? " (today)" : ""}`,
+            value: candidate.id,
+          })),
+        );
+        if (!chosen) return { text: "Not recorded; no replacement chosen." };
+
+        const created = store.add(draft);
+        store.retire(chosen);
+        ledger.recordRetired(chosen, `replaced by ${created.id}`);
+        ledger.forget(chosen);
+        // A replacement leaves the store the same size, so it does not spend budget.
+        ledger.recordWrite(created.id, false);
+        void refreshSemantic(runtime);
+        return { text: `Recorded ${created.id} in place of ${chosen}, which is retired.` };
+      }
+
+      if (overBudget) ledger.recordOverride();
+    }
+
+    if (overBudget && !needsReview) {
+      return {
+        text:
+          `${written} gotchas were already recorded today, which is the budget across all ` +
+          "sessions and subagents. Updating an existing gotcha is always allowed and does not " +
+          "spend budget, so prefer that. The user can raise today's budget with /gotchas-budget.",
+      };
+    }
+
+    const created = store.add(draft);
+    ledger.recordWrite(created.id);
     void refreshSemantic(runtime);
-    const remaining = Math.max(0, cap - written - 1);
+    const remaining = Math.max(0, cap - ledger.writesToday());
     return {
       text:
         `Recorded ${created.id}. ${remaining} more can be recorded today; updating existing ` +

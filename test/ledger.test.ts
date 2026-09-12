@@ -21,21 +21,35 @@ describe("write budget", () => {
   test("starts at zero and counts up", () => {
     const ledger = new Ledger(store());
     assert.equal(ledger.writesToday(), 0);
-    ledger.recordWrite();
-    ledger.recordWrite();
+    ledger.recordWrite("a");
+    ledger.recordWrite("b");
     assert.equal(ledger.writesToday(), 2);
   });
 
   test("survives a new Ledger over the same store, which is how subagents share it", () => {
     const shared = store();
-    new Ledger(shared).recordWrite();
+    new Ledger(shared).recordWrite("a");
     assert.equal(new Ledger(shared).writesToday(), 1);
+  });
+
+  test("a replacement records the id without spending budget", () => {
+    const ledger = new Ledger(store());
+    ledger.recordWrite("kept", false);
+    assert.equal(ledger.writesToday(), 0);
+    assert.deepEqual(ledger.writtenToday(), ["kept"]);
+  });
+
+  test("today's ids are remembered for offering as replacements", () => {
+    const ledger = new Ledger(store());
+    ledger.recordWrite("a");
+    ledger.recordWrite("b");
+    assert.deepEqual(ledger.writtenToday(), ["a", "b"]);
   });
 
   test("a corrupt ledger costs counters, not the store", () => {
     const shared = store();
     const ledger = new Ledger(shared);
-    ledger.recordWrite();
+    ledger.recordWrite("a");
     writeFileSync(join(shared.cacheDir, "ledger.json"), "{ not json");
     assert.equal(new Ledger(shared).writesToday(), 0);
     assert.equal(shared.list().length, 1);
@@ -120,7 +134,7 @@ describe("retired log", () => {
 
   test("the cache directory exists for it", () => {
     const shared = store();
-    new Ledger(shared).recordWrite();
+    new Ledger(shared).recordWrite("a");
     assert.ok(existsSync(join(shared.cacheDir, "ledger.json")));
   });
 });

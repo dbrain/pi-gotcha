@@ -95,7 +95,14 @@ export default function (pi: any): void {
         typeof ctx?.ui?.confirm === "function"
           ? (question: string, detail: string) => ctx.ui.confirm(question, detail)
           : undefined;
-      const result = await runGotchaTool(ready(ctx), params, { ask });
+      const choose =
+        typeof ctx?.ui?.select === "function"
+          ? async (question: string, options: Array<{ label: string; value: string }>) => {
+              const picked = await ctx.ui.select(question, options.map((option) => option.label));
+              return picked ? (options.find((option) => option.label === picked)?.value ?? null) : null;
+            }
+          : undefined;
+      const result = await runGotchaTool(ready(ctx), params, { ask, choose });
       return { content: [{ type: "text", text: result.text }], details: {} };
     },
   });
@@ -113,15 +120,72 @@ export default function (pi: any): void {
         ? "meaning-based search ready"
         : `keyword only${active.semantic.failure ? `: ${active.semantic.failure}` : ""}`;
       const overrides = active.ledger.overridesToday();
+      const pending = active.store.proposals().length;
       ctx.ui.notify(
         [
           `${all.length} gotchas in ${active.store.dir} (${semantic})`,
+          ...(pending ? [`${pending} proposed, waiting for /gotchas-proposals`] : []),
           `Recorded today: ${active.ledger.writesToday()} of ${active.ledger.capToday(active.settings.dailyWriteCap)}` +
             (overrides ? ` (${overrides} approved over budget)` : ""),
           `Surfaced this session: ${active.surfacer.seenCount()}`,
         ].join("\n"),
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("gotchas-proposals", {
+    description: "Resolve gotchas proposed by subagents: accept, reject, or replace an existing one",
+    handler: async (_args: string, ctx: any) => {
+      const active = ready(ctx);
+      const proposals = active.store.proposals();
+      if (!proposals.length) {
+        ctx.ui.notify("No proposals pending.", "info");
+        return;
+      }
+
+      const done: string[] = [];
+      for (const proposal of proposals) {
+        const scope = proposal.paths.length ? proposal.paths.join(", ") : "project-wide";
+        const picked = await ctx.ui.select(
+          `${proposal.summary}\n[${scope}] expected: ${proposal.expected} / actually: ${proposal.actual}`,
+          ["Accept", "Reject", "Replace an existing gotcha…", "Leave for later"],
+        );
+        if (!picked || picked === "Leave for later") break;
+
+        if (picked === "Accept") {
+          const accepted = active.store.acceptProposal(proposal.id);
+          if (accepted) active.ledger.recordWrite(accepted.id, false);
+          done.push(`accepted ${proposal.id}`);
+          continue;
+        }
+        if (picked === "Reject") {
+          active.store.rejectProposal(proposal.id);
+          done.push(`rejected ${proposal.id}`);
+          continue;
+        }
+
+        const existing = gotchas(active);
+        if (!existing.length) {
+          done.push(`nothing to replace for ${proposal.id}`);
+          continue;
+        }
+        const target = await ctx.ui.select(
+          `Which gotcha should ${proposal.id} replace?`,
+          existing.map((gotcha) => `${gotcha.id} — ${gotcha.summary}`),
+        );
+        if (!target) continue;
+        const targetId = String(target).split(" — ")[0];
+        active.store.retire(targetId);
+        active.ledger.recordRetired(targetId, `replaced by ${proposal.id}`);
+        active.ledger.forget(targetId);
+        active.store.acceptProposal(proposal.id);
+        active.ledger.recordWrite(proposal.id, false);
+        done.push(`${proposal.id} replaced ${targetId}`);
+      }
+
+      void refreshSemantic(active);
+      ctx.ui.notify(done.length ? done.join("\n") : "Nothing resolved.", "info");
     },
   });
 

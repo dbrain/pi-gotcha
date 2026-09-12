@@ -102,6 +102,23 @@ Paraphrase is the standing weakness either way: "why is the invoice total coming
 
 `npm run floors` prints the recall-against-silence curve that set the default floor.
 
+## Can a weak model actually use it?
+
+`npm run eval` puts a live model in front of the real tool — ten scenarios, five worth recording and five not — and scores both its judgement and what the guards did with each attempt.
+
+Against **Gemma 4 12B** (chosen as a deliberately weak model), temperature 0:
+
+| | |
+| --- | --- |
+| Decisions matching intent | 10/10 |
+| Worth recording, stored | 5/5 |
+| Junk attempted | 0/5 |
+| Aliases written | 4 on every record |
+
+It skipped the preference, the task log, the plan, the thing the code already said, and the thing that worked as documented — without any guard needing to fire.
+
+The run earned its keep in another way: the first pass had one genuine gotcha **rejected by my own junk filter**, because the model wrote "(like formatted currency)" and the preference pattern matched the word "like". The patterns now require a person doing the preferring, and that summary is a regression test.
+
 ## Open question: can agents be trusted to write these?
 
 Partly, and the design leans on that rather than assuming it.
@@ -112,6 +129,10 @@ What a model gets wrong is not malice but calibration: asked to record what's im
 
 - **Required `expected` and `actual` fields.** Recording trivia becomes awkward, because there is nothing to put in them.
 - **Wording-based refusal.** Stated preferences, "I changed X to Y", TODOs and reminders are rejected outright.
+- **A vagueness floor.** "Cache behaves oddly" is refused: too vague to ever find again.
+- **Worked examples in the tool description.** A small model copies a shown pattern far more reliably than it follows a stated rule.
+- **Review before it lands.** By default a write past the daily budget asks you: record it anyway, replace an existing gotcha (today's writes first, then the closest matches), or skip. A replacement spends no budget, because the store didn't grow.
+- **Subagents propose rather than write.** A background agent has no one to ask, so its write lands in `.gotchas/proposed/` — tracked by git, invisible to search until accepted, resolved with `/gotchas-proposals`.
 - **A duplicate check on write** returns the existing gotcha instead of filing a near-copy.
 - **A budget of 5 new gotchas per day**, counted in the store, so it holds across sessions and across the separate processes background subagents run in. Updating an existing gotcha is unlimited and never spends budget. When the budget runs out the tool asks you to approve the next one, and approvals are counted so a hot day is visible later; a background subagent has nobody to ask and is simply refused. For a day of deep work, `/gotchas-budget 20` raises it in one go.
 - **At least two aliases**, because a gotcha nobody can find again is only cost.

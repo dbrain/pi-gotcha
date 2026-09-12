@@ -10,6 +10,7 @@ export interface Usage {
 
 interface LedgerFile {
   writes: Record<string, number>;
+  written: Record<string, string[]>;
   allowance: Record<string, number>;
   overrides: Record<string, number>;
   usage: Record<string, Usage>;
@@ -44,6 +45,7 @@ export class Ledger {
         const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<LedgerFile>;
         this.cache = {
           writes: parsed.writes ?? {},
+          written: parsed.written ?? {},
           allowance: parsed.allowance ?? {},
           overrides: parsed.overrides ?? {},
           usage: parsed.usage ?? {},
@@ -53,13 +55,14 @@ export class Ledger {
         /* a corrupt ledger costs counters, never the store */
       }
     }
-    this.cache = { writes: {}, allowance: {}, overrides: {}, usage: {} };
+    this.cache = { writes: {}, written: {}, allowance: {}, overrides: {}, usage: {} };
     return this.cache;
   }
 
   private save(data: LedgerFile): void {
     const cutoff = new Date(Date.now() - KEEP_DAYS * 86_400_000).toISOString().slice(0, 10);
     for (const day of Object.keys(data.writes)) if (day < cutoff) delete data.writes[day];
+    for (const day of Object.keys(data.written)) if (day < cutoff) delete data.written[day];
     for (const day of Object.keys(data.allowance)) if (day < cutoff) delete data.allowance[day];
     for (const day of Object.keys(data.overrides)) if (day < cutoff) delete data.overrides[day];
     this.cache = data;
@@ -70,10 +73,16 @@ export class Ledger {
     return this.load().writes[today()] ?? 0;
   }
 
-  recordWrite(): void {
+  // `spends` is false for a replacement: the store did not grow, so the budget did not move.
+  recordWrite(id: string, spends = true): void {
     const data = this.load();
-    data.writes[today()] = (data.writes[today()] ?? 0) + 1;
+    if (spends) data.writes[today()] = (data.writes[today()] ?? 0) + 1;
+    data.written[today()] = [...(data.written[today()] ?? []), id];
     this.save(data);
+  }
+
+  writtenToday(): string[] {
+    return this.load().written[today()] ?? [];
   }
 
   // A day of deep work can genuinely produce more findings than the standing budget, so the

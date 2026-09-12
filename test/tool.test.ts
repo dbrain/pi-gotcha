@@ -76,6 +76,36 @@ describe("what counts as a gotcha", () => {
     });
   }
 
+  /* Every one of these was, or would have been, wrongly refused by a junk pattern. The first is
+     verbatim from a 12B in eval/tool-use.mjs. */
+  const legitimate: Array<[string, string]> = [
+    [
+      "a parenthetical 'like'",
+      "CSV export rows with commas (like formatted currency) are silently dropped by the downstream finance parser.",
+    ],
+    ["a parser that prefers something", "The XML parser prefers UTF-8 and silently mangles latin-1 payloads"],
+    [
+      "a genuine 'next time'",
+      "Pods run pending migrations on boot, so the next time a pod starts the schema can change under a running query",
+    ],
+    ["a component that wants something", "The scheduler wants monotonic clocks and silently reorders jobs without them"],
+  ];
+  for (const [name, summary] of legitimate) {
+    test(`records despite ${name}`, async () => {
+      const active = runtime();
+      const result = await runGotchaTool(active, { ...ADD, summary });
+      assert.match(result.text, /^Recorded /, result.text);
+      assert.equal(active.store.list().length, 1);
+    });
+  }
+
+  test("refuses a summary too vague to find again", async () => {
+    const active = runtime();
+    const result = await runGotchaTool(active, { ...ADD, summary: "Cache behaves oddly" });
+    assert.match(result.text, /too vague/);
+    assert.equal(active.store.list().length, 0);
+  });
+
   test("refuses without enough aliases", async () => {
     const active = runtime();
     const result = await runGotchaTool(active, { ...ADD, aliases: ["money"] });
@@ -109,7 +139,7 @@ describe("what counts as a gotcha", () => {
 
 describe("write budget", () => {
   test("caps writes per day across sessions, not per session", async () => {
-    const active = runtime({ dailyWriteCap: 1 });
+    const active = runtime({ dailyWriteCap: 1, reviewWrites: "never" });
     await runGotchaTool(active, ADD);
     const result = await runGotchaTool(active, OTHER);
     assert.match(result.text, /budget across all/);
@@ -117,9 +147,9 @@ describe("write budget", () => {
   });
 
   test("a fresh runtime over the same store still sees the budget spent", async () => {
-    const active = runtime({ dailyWriteCap: 1 });
+    const active = runtime({ dailyWriteCap: 1, reviewWrites: "never" });
     await runGotchaTool(active, ADD);
-    const second = runtimeFor(active.root, { dailyWriteCap: 1 });
+    const second = runtimeFor(active.root, { dailyWriteCap: 1, reviewWrites: "never" });
     assert.match((await runGotchaTool(second, OTHER)).text, /budget across all/);
   });
 
@@ -140,65 +170,149 @@ describe("write budget", () => {
     assert.equal(active.ledger.writesToday(), 1);
   });
 
-  test("asks when over budget and records on approval", async () => {
-    const active = runtime({ dailyWriteCap: 1 });
-    await runGotchaTool(active, ADD);
-    const asked: string[] = [];
-    const result = await runGotchaTool(active, OTHER, {
-      ask: async (question) => {
-        asked.push(question);
-        return true;
-      },
-    });
-    assert.match(result.text, /^Recorded /);
-    assert.equal(active.store.list().length, 2);
-    assert.equal(active.ledger.overridesToday(), 1);
-    assert.match(asked[0], /budget is 1/);
-  });
-
-  test("a declined prompt records nothing", async () => {
-    const active = runtime({ dailyWriteCap: 1 });
-    await runGotchaTool(active, ADD);
-    const result = await runGotchaTool(active, OTHER, { ask: async () => false });
-    assert.match(result.text, /budget across all/);
-    assert.equal(active.store.list().length, 1);
-    assert.equal(active.ledger.overridesToday(), 0);
-  });
-
-  test("with no one to ask, as in a background subagent, it is refused", async () => {
-    const active = runtime({ dailyWriteCap: 1 });
-    await runGotchaTool(active, ADD);
-    assert.match((await runGotchaTool(active, OTHER)).text, /budget across all/);
-  });
-
-  test("prompting can be turned off", async () => {
-    const active = runtime({ dailyWriteCap: 1, overBudgetPrompt: false });
-    await runGotchaTool(active, ADD);
-    let asked = false;
-    const result = await runGotchaTool(active, OTHER, {
-      ask: async () => {
-        asked = true;
-        return true;
-      },
-    });
-    assert.equal(asked, false);
-    assert.match(result.text, /budget across all/);
-  });
-
   test("a raised budget is spent without asking", async () => {
     const active = runtime({ dailyWriteCap: 1 });
     await runGotchaTool(active, ADD);
     active.ledger.raiseToday(5);
     let asked = false;
     const result = await runGotchaTool(active, OTHER, {
-      ask: async () => {
+      choose: async () => {
         asked = true;
-        return true;
+        return "record";
       },
     });
     assert.match(result.text, /^Recorded /);
     assert.equal(asked, false);
     assert.equal(active.ledger.overridesToday(), 0);
+  });
+});
+
+describe("review", () => {
+  const overBudget = { dailyWriteCap: 1 };
+
+  test("offers record, replace and skip when over budget", async () => {
+    const active = runtime(overBudget);
+    await runGotchaTool(active, ADD);
+    const offered: string[][] = [];
+    await runGotchaTool(active, OTHER, {
+      choose: async (_question, options) => {
+        offered.push(options.map((option) => option.value));
+        return "skip";
+      },
+    });
+    assert.deepEqual(offered[0], ["record", "replace", "skip"]);
+  });
+
+  test("recording anyway counts as an approved override", async () => {
+    const active = runtime(overBudget);
+    await runGotchaTool(active, ADD);
+    const result = await runGotchaTool(active, OTHER, { choose: async () => "record" });
+    assert.match(result.text, /^Recorded /);
+    assert.equal(active.store.list().length, 2);
+    assert.equal(active.ledger.overridesToday(), 1);
+  });
+
+  test("skipping records nothing", async () => {
+    const active = runtime(overBudget);
+    await runGotchaTool(active, ADD);
+    const result = await runGotchaTool(active, OTHER, { choose: async () => "skip" });
+    assert.match(result.text, /skipped/);
+    assert.equal(active.store.list().length, 1);
+  });
+
+  test("dismissing the prompt records nothing", async () => {
+    const active = runtime(overBudget);
+    await runGotchaTool(active, ADD);
+    await runGotchaTool(active, OTHER, { choose: async () => null });
+    assert.equal(active.store.list().length, 1);
+  });
+
+  test("replacing retires the old one, keeps the store the same size, and spends no budget", async () => {
+    const active = runtime(overBudget);
+    const firstId = idFromResult((await runGotchaTool(active, ADD)).text);
+    assert.equal(active.ledger.writesToday(), 1);
+
+    const asked: string[] = [];
+    const result = await runGotchaTool(active, OTHER, {
+      choose: async (question, options) => {
+        asked.push(question);
+        return asked.length === 1 ? "replace" : options[0].value;
+      },
+    });
+
+    assert.match(result.text, new RegExp(`in place of ${firstId}`));
+    assert.equal(active.store.get(firstId), undefined);
+    assert.equal(active.store.list().length, 1);
+    assert.equal(active.ledger.writesToday(), 1);
+    assert.match(asked[1], /Which gotcha should this replace/);
+  });
+
+  test("today's writes are offered as replacement candidates, labelled", async () => {
+    const active = runtime(overBudget);
+    const firstId = idFromResult((await runGotchaTool(active, ADD)).text);
+    const labels: string[] = [];
+    await runGotchaTool(active, OTHER, {
+      choose: async (_question, options) => {
+        labels.push(...options.map((option) => option.label));
+        return labels.length > 3 ? null : "replace";
+      },
+    });
+    assert.ok(labels.some((label) => label.startsWith(firstId) && label.endsWith("(today)")));
+  });
+
+  test("with no one to ask, the write becomes a proposal", async () => {
+    const active = runtime(overBudget);
+    await runGotchaTool(active, ADD);
+    const result = await runGotchaTool(active, OTHER);
+    assert.match(result.text, /^Proposed /);
+    assert.equal(active.store.list().length, 1);
+    assert.equal(active.store.proposals().length, 1);
+  });
+
+  test("reviewWrites always asks even under budget", async () => {
+    const active = runtime({ reviewWrites: "always" });
+    let asked = 0;
+    const result = await runGotchaTool(active, ADD, {
+      choose: async () => {
+        asked += 1;
+        return "record";
+      },
+    });
+    assert.equal(asked, 1);
+    assert.match(result.text, /^Recorded /);
+    assert.equal(active.ledger.overridesToday(), 0);
+  });
+
+  test("reviewWrites always proposes when nobody can be asked", async () => {
+    const active = runtime({ reviewWrites: "always" });
+    assert.match((await runGotchaTool(active, ADD)).text, /^Proposed /);
+    assert.equal(active.store.proposals().length, 1);
+  });
+
+  test("reviewWrites never refuses over budget without asking", async () => {
+    const active = runtime({ dailyWriteCap: 1, reviewWrites: "never" });
+    await runGotchaTool(active, ADD);
+    let asked = false;
+    const result = await runGotchaTool(active, OTHER, {
+      choose: async () => {
+        asked = true;
+        return "record";
+      },
+    });
+    assert.equal(asked, false);
+    assert.match(result.text, /budget across all/);
+  });
+
+  test("under budget with the default mode, nothing is asked", async () => {
+    const active = runtime({ dailyWriteCap: 5 });
+    let asked = false;
+    await runGotchaTool(active, ADD, {
+      choose: async () => {
+        asked = true;
+        return "record";
+      },
+    });
+    assert.equal(asked, false);
   });
 });
 

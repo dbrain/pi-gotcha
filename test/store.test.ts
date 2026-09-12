@@ -91,6 +91,41 @@ describe("store", () => {
     assert.match(readFileSync(ignore, "utf8"), /\.cache\//);
   });
 
+  test("a proposal is held apart from the store until accepted", () => {
+    const store = new GotchaStore(root());
+    const proposed = store.propose(SAMPLE);
+    assert.equal(store.list().length, 0);
+    assert.equal(store.proposals().length, 1);
+    assert.equal(store.get(proposed.id), undefined);
+    assert.equal(store.getProposal(proposed.id)?.summary, SAMPLE.summary);
+  });
+
+  test("accepting a proposal moves it into the store", () => {
+    const store = new GotchaStore(root());
+    const proposed = store.propose(SAMPLE);
+    const accepted = store.acceptProposal(proposed.id);
+    assert.equal(accepted?.id, proposed.id);
+    assert.equal(store.list().length, 1);
+    assert.equal(store.proposals().length, 0);
+  });
+
+  test("rejecting a proposal deletes it", () => {
+    const store = new GotchaStore(root());
+    const proposed = store.propose(SAMPLE);
+    assert.equal(store.rejectProposal(proposed.id), true);
+    assert.equal(store.rejectProposal(proposed.id), false);
+    assert.equal(store.proposals().length, 0);
+  });
+
+  test("a proposal id never collides with a recorded one", () => {
+    const store = new GotchaStore(root());
+    const recorded = store.add(SAMPLE);
+    const proposed = store.propose(SAMPLE);
+    assert.notEqual(recorded.id, proposed.id);
+    store.acceptProposal(proposed.id);
+    assert.equal(store.list().length, 2);
+  });
+
   test("hash tracks content, signature tracks the store", () => {
     const store = new GotchaStore(root());
     const written = store.add(SAMPLE);

@@ -86,7 +86,15 @@ describe("extension wiring", () => {
     assert.ok(pi.tools.has("gotcha"));
     assert.deepEqual(
       [...pi.commands.keys()].sort(),
-      ["gotchas", "gotchas-apply", "gotchas-audit", "gotchas-budget", "gotchas-index", "gotchas-review"],
+      [
+        "gotchas",
+        "gotchas-apply",
+        "gotchas-audit",
+        "gotchas-budget",
+        "gotchas-index",
+        "gotchas-proposals",
+        "gotchas-review",
+      ],
     );
   });
 

@@ -3,10 +3,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export type EmbeddingProvider = "auto" | "local" | "remote" | "off";
+export type ReviewWrites = "always" | "over-budget" | "never";
 
 export interface Settings {
   surface: boolean;
-  overBudgetPrompt: boolean;
+  reviewWrites: ReviewWrites;
+  minSummaryWords: number;
   maxSurfacedPerTurn: number;
   maxPathSurfacedPerTurn: number;
   standout: number;
@@ -30,7 +32,8 @@ export interface Settings {
 
 export const DEFAULTS: Settings = {
   surface: true,
-  overBudgetPrompt: true,
+  reviewWrites: "over-budget",
+  minSummaryWords: 6,
   maxSurfacedPerTurn: 2,
   maxPathSurfacedPerTurn: 3,
   standout: 1.4,
@@ -61,6 +64,7 @@ const NUMERIC: Array<keyof Settings> = [
   "duplicateOverlap",
   "minEvidence",
   "requireAliases",
+  "minSummaryWords",
   "listLimit",
   "maxBodyChars",
   "readChunk",
@@ -80,7 +84,9 @@ function coerce(raw: unknown): Partial<Settings> {
   const source = raw as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   if (typeof source.surface === "boolean") out.surface = source.surface;
-  if (typeof source.overBudgetPrompt === "boolean") out.overBudgetPrompt = source.overBudgetPrompt;
+  if (source.reviewWrites === "always" || source.reviewWrites === "over-budget" || source.reviewWrites === "never") {
+    out.reviewWrites = source.reviewWrites;
+  }
   for (const key of NUMERIC) if (Number.isFinite(source[key])) out[key] = Number(source[key]);
   if (source.embeddings && typeof source.embeddings === "object") {
     const embeddings = source.embeddings as Record<string, unknown>;

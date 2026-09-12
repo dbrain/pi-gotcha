@@ -78,16 +78,29 @@ The write desk is where memory systems fail, so every guard here is deterministi
 | Guard | Effect |
 | --- | --- |
 | `expected` and `actual` both required | Structure is the bar. "I set this to 2 because the user likes even numbers" has nothing to put in either |
-| Junk patterns refused | Stated preferences, "I changed X", TODOs and reminders are rejected by wording, on add and update |
+| Junk patterns refused | Stated preferences, "I changed X", TODOs and reminders are rejected by wording, on add and update. Every pattern names a person doing the preferring or planning, because matching bare verbs rejects real findings |
+| Vagueness floor | `minSummaryWords` (6) content words after stopwords, so "Cache behaves oddly" never reaches the store |
 | At least 2 aliases | Retrieval leans on them; without them the gotcha will not be found again |
 | Summary ≤ 200 characters | Keeps the surfaced line one line |
 | Duplicate check | Token overlap ≥ `duplicateOverlap`, or cosine ≥ `duplicateThreshold`, returns the existing gotcha |
-| Daily write budget | `dailyWriteCap` (5) across every session and subagent, counted in the store, not in memory. `update` is exempt: refining an existing gotcha is unlimited. Over budget, the tool asks the user through `ctx.ui.confirm` and counts approvals; with no UI — a background subagent — it is refused. `/gotchas-budget <n>` raises the allowance for today only |
+| Daily write budget | `dailyWriteCap` (5) across every session and subagent, counted in the store, not in memory. `update` is exempt: refining an existing gotcha is unlimited. `/gotchas-budget <n>` raises the allowance for today only |
 | Reason required to retire | Logged to `.cache/retired.log`; git keeps the file |
 | `list` capped | `listLimit` (30), with a count of what it left out |
 | Body capped | `maxBodyChars` (8000) on add and update: record the constraint and the values that matter, and point at the file or commit rather than pasting output |
 
 `read` is the only channel that returns a body, and it returns `readChunk` (2000) characters at a time with an offset to continue, so one heavy gotcha cannot flood a session. Continuing is not counted as a second opening.
+
+## Review and proposals
+
+`reviewWrites` decides when a human sees a write before it lands: `over-budget` (default), `always`, or `never`.
+
+When review is due and there is someone to ask, the tool offers three resolutions through `ctx.ui.select`:
+
+- **Record it** — lands as usual; over budget it also counts as an approved override, so a hot day stays visible in `/gotchas` and review.
+- **Replace an existing gotcha** — picks from today's writes first (labelled), then whatever the store says is closest to the new one. The old one is retired with the reason logged, and because the store did not grow, the replacement spends no budget.
+- **Skip** — nothing is written.
+
+When review is due and there is nobody to ask — a background subagent, which has no UI — the write becomes a **proposal** under `.gotchas/proposed/` instead of being refused. Proposals are tracked by git, so one written on a laptop can be resolved on a desktop; they are never indexed, surfaced or searched until accepted. `/gotchas-proposals` walks them: accept, reject, or replace an existing gotcha. Accepting spends no budget, since a human made the decision.
 
 ## Audit
 
@@ -109,7 +122,8 @@ Usage counts are what make this evidence-based: surfaced many times and never op
 ```json
 {
   "surface": true,
-  "overBudgetPrompt": true,
+  "reviewWrites": "over-budget",
+  "minSummaryWords": 6,
   "maxSurfacedPerTurn": 2,
   "maxPathSurfacedPerTurn": 3,
   "standout": 1.4,
@@ -131,9 +145,12 @@ Usage counts are what make this evidence-based: surfaced many times and never op
 
 ## Testing
 
-- `npm test` — 179 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and all three thresholds, every write guard and refusal, body capping and paginated reads, the ledger's budget, allowance and usage counters, settings precedence, surfacing lifecycle, audit parsing and application, index generation, and extension wiring driven through a fake `pi`.
+- `npm test` — 198 tests: store round-trips and malformed input, path matching including its known blind spots, fusion and all three thresholds, every write guard and refusal, body capping and paginated reads, the ledger's budget, allowance and usage counters, settings precedence, surfacing lifecycle, audit parsing and application, index generation, and extension wiring driven through a fake `pi`.
 - `npm run bench` — recall by query kind over the fixture corpus, misses printed by name. `PI_GOTCHA_EMBEDDINGS=local` to compare modes.
 - `npm run floors` — the recall-against-silence curve behind the default floor.
+- `npm run eval` — a live model against the real tool schema and description: ten scenarios, five worth recording and five not. It scores the model's judgement *and* what the deterministic guards did with each attempt, which is the number that matters. Point it anywhere with `GOTCHA_EVAL_URL` / `GOTCHA_EVAL_MODEL`.
+
+Measured against Gemma 4 12B (a deliberately weak model, llama.cpp, temperature 0): 10/10 decisions correct, 5/5 worth-recording stored, 0 junk attempted, 4 aliases on every write. That run is also what caught the junk patterns rejecting a real finding.
 
 ## Known limits
 
@@ -141,5 +158,5 @@ Usage counts are what make this evidence-based: surfaced many times and never op
 - **Paraphrase recall is 42%** of delivered results in both modes; aliases are the mitigation.
 - **Typos cost recall**: fuzzy matching handles one-word slips, not `"stipe webhok retrys"`.
 - **The floor is tuned on a synthetic corpus** of 30 gotchas; re-run `npm run floors` against a real store.
-- **Junk detection is wording-based.** A preference dressed up as a finding will pass; the daily budget, usage counts and review command are the backstop.
+- **Junk detection is wording-based.** A preference dressed up as a finding will pass; the daily budget, usage counts and review command are the backstop. It cuts the other way too: a 12B once had a real gotcha rejected because its summary contained "(like formatted currency)", which is why the patterns now require a person doing the preferring. Re-run `npm run eval` after touching them.
 - **The first query of a session is keyword-only** while the model loads.

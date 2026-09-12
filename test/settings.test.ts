@@ -50,9 +50,14 @@ describe("loadSettings", () => {
     assert.equal(loadSettings(project({ surface: false })).surface, false);
   });
 
-  test("over-budget prompting can be turned off", () => {
-    assert.equal(loadSettings(project({ overBudgetPrompt: false })).overBudgetPrompt, false);
-    assert.equal(loadSettings(project()).overBudgetPrompt, true);
+  test("review mode defaults to over-budget and is settable", () => {
+    assert.equal(loadSettings(project()).reviewWrites, "over-budget");
+    assert.equal(loadSettings(project({ reviewWrites: "always" })).reviewWrites, "always");
+    assert.equal(loadSettings(project({ reviewWrites: "never" })).reviewWrites, "never");
+  });
+
+  test("a nonsense review mode is ignored", () => {
+    assert.equal(loadSettings(project({ reviewWrites: "sometimes" })).reviewWrites, "over-budget");
   });
 
   test("embedding settings merge rather than replace wholesale", () => {
