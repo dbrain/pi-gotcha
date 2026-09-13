@@ -70,9 +70,17 @@ const NUMERIC: Array<keyof Settings> = [
   "readChunk",
 ];
 
-export function settingsPath(): string {
+// The user-level home for pi-gotcha: the settings file, the user store (cross-project
+// knowledge) and the debug log all live here. PI_GOTCHA_USER_DIR replaces the whole
+// directory so tests and unusual installs can move everything off ~/.config.
+export function userConfigDir(): string {
+  if (process.env.PI_GOTCHA_USER_DIR) return process.env.PI_GOTCHA_USER_DIR;
   const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(base, "pi-gotcha", "settings.json");
+  return join(base, "pi-gotcha");
+}
+
+export function settingsPath(): string {
+  return join(userConfigDir(), "settings.json");
 }
 
 export function projectSettingsPath(root: string): string {

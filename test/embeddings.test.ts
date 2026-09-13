@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { embeddingRuntimeRoots, entryPointIn, LOCAL_PACKAGE } from "../extensions/lib/embeddings.ts";
-import { cleanup, tempRoot } from "./helpers.ts";
+import { embeddingRuntimeRoots, entryPointIn, LOCAL_PACKAGE, SemanticIndex } from "../extensions/lib/embeddings.ts";
+import { GotchaStore } from "../extensions/lib/store.ts";
+import { cleanup, SAMPLE, settingsFor, tempRoot } from "./helpers.ts";
 
 const roots: string[] = [];
 
@@ -80,5 +83,98 @@ describe("embeddingRuntimeRoots", () => {
       if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previous;
     }
+  });
+});
+
+describe("SemanticIndex.refresh persistence", () => {
+  /* A local endpoint that answers the remote embedder's protocol, so the refresh tests exercise
+     the real code path without a model or the network. */
+  async function fakeEmbedServer(): Promise<{ endpoint: string; close: () => Promise<void> }> {
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        const { input } = JSON.parse(body) as { input: string[] };
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: input.map((text, i) => ({ embedding: [i + 1, text.length] })) }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    return {
+      endpoint: `http://127.0.0.1:${port}`,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    };
+  }
+
+  async function warmStore(): Promise<{
+    store: GotchaStore;
+    index: SemanticIndex;
+    cachePath: string;
+    id: string;
+    hash: string;
+    close: () => Promise<void>;
+  }> {
+    const { endpoint, close } = await fakeEmbedServer();
+    const root = tempRoot();
+    roots.push(root);
+    const store = new GotchaStore(root);
+    const added = store.add(SAMPLE);
+    const index = new SemanticIndex(
+      store,
+      settingsFor({ embeddings: { provider: "remote", endpoint, model: "test" } }),
+    );
+    await index.refresh(store.list());
+    return {
+      store,
+      index,
+      cachePath: join(store.ensureCacheDir(), "embeddings.json"),
+      id: added.id,
+      hash: added.hash,
+      close,
+    };
+  }
+
+  test("a deletion-only refresh rewrites the cache", async () => {
+    const ctx = await warmStore();
+    try {
+      const before = JSON.parse(readFileSync(ctx.cachePath, "utf8")) as { vectors: Record<string, number[]> };
+      assert.ok(before.vectors[ctx.hash], "the warm refresh cached the vector");
+
+      ctx.store.retire(ctx.id);
+      await ctx.index.refresh(ctx.store.list());
+
+      const after = JSON.parse(readFileSync(ctx.cachePath, "utf8")) as { vectors: Record<string, number[]> };
+      assert.equal(after.vectors[ctx.hash], undefined, "the retired gotcha's vector is gone from disk");
+      assert.equal(Object.keys(after.vectors).length, 0);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test("a refresh with no changes does not rewrite the cache", async () => {
+    const ctx = await warmStore();
+    try {
+      const first = statSync(ctx.cachePath).mtimeMs;
+      await ctx.index.refresh(ctx.store.list());
+      assert.equal(statSync(ctx.cachePath).mtimeMs, first);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test("an empty store with nothing cached never resolves the embedder", async () => {
+    const root = tempRoot();
+    roots.push(root);
+    const store = new GotchaStore(root);
+    // Provider 'local' would have to load a model; the guard must skip that for an empty store.
+    const index = new SemanticIndex(store, settingsFor({ embeddings: { provider: "local" } }));
+    await index.refresh(store.list());
+    assert.equal(index.ready, false);
+    assert.equal(index.failure, undefined);
   });
 });

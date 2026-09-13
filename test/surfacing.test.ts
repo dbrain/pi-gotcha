@@ -86,6 +86,30 @@ describe("Surfacer", () => {
     assert.equal(new Surfacer().flush(), null);
   });
 
+  test("flush drops a staged line whose gotcha is gone", () => {
+    const surfacer = new Surfacer();
+    surfacer.stage([gotcha("a")]);
+    assert.equal(surfacer.flush(() => undefined), null);
+    // A dropped line is not re-staged later in the session.
+    surfacer.stage([gotcha("a")]);
+    assert.equal(surfacer.flush(() => undefined), null);
+  });
+
+  test("flush re-renders a staged line from the current gotcha", () => {
+    const surfacer = new Surfacer();
+    surfacer.stage([gotcha("a")]);
+    const corrected = { ...gotcha("a"), summary: "a was corrected after staging" };
+    const flushed = surfacer.flush(() => corrected);
+    assert.equal(flushed?.text, "[gotcha] project — a was corrected after staging (id: a)");
+    assert.deepEqual(flushed?.ids, ["a"]);
+  });
+
+  test("flush with no lookup delivers the staged text", () => {
+    const surfacer = new Surfacer();
+    surfacer.stage([gotcha("a")]);
+    assert.equal(surfacer.flush()?.text, "[gotcha] project — a is surprising (id: a)");
+  });
+
   test("seenCount tracks what this session has been told", () => {
     const surfacer = new Surfacer();
     surfacer.stage([gotcha("a"), gotcha("b")]);

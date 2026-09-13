@@ -118,19 +118,34 @@ export function remoteEmbedder(endpoint: string, model: string, apiKey?: string)
   };
 }
 
+// A resolved embedder is reusable for the life of the process: the remote one is stateless, and
+// the local one is the expensive part (a loaded model), so indexes that share a provider, model
+// and endpoint share it instead of each loading the model. Failures are not cached, so a model
+// that failed to load is retried on the next refresh.
+const resolvedEmbedders = new Map<string, Embedder>();
+
 export async function resolveEmbedder(settings: Settings): Promise<Embedder | null> {
   const { provider, model, endpoint, apiKey } = settings.embeddings;
   if (provider === "off") return null;
+  const key = `${provider}:${model}:${endpoint ?? ""}`;
+  const cached = resolvedEmbedders.get(key);
+  if (cached) return cached;
+
+  let embedder: Embedder | null;
   if (provider === "remote") {
     if (!endpoint) throw new Error("embeddings.provider is 'remote' but embeddings.endpoint is not set");
-    return remoteEmbedder(endpoint, model, apiKey);
+    embedder = remoteEmbedder(endpoint, model, apiKey);
+  } else if (provider === "local") {
+    embedder = await localEmbedder(model);
+  } else {
+    try {
+      embedder = await localEmbedder(model);
+    } catch {
+      embedder = endpoint ? remoteEmbedder(endpoint, model, apiKey) : null;
+    }
   }
-  if (provider === "local") return localEmbedder(model);
-  try {
-    return await localEmbedder(model);
-  } catch {
-    return endpoint ? remoteEmbedder(endpoint, model, apiKey) : null;
-  }
+  if (embedder) resolvedEmbedders.set(key, embedder);
+  return embedder;
 }
 
 interface CacheFile {
@@ -172,6 +187,8 @@ export class SemanticIndex {
 
   async refresh(gotchas: Gotcha[]): Promise<void> {
     if (this.settings.embeddings.provider === "off") return;
+    // Nothing to index and nothing cached: skip resolving the embedder, which would load the model.
+    if (!gotchas.length && this.vectors.size === 0) return;
     try {
       if (!this.embedder) this.embedder = await resolveEmbedder(this.settings);
       if (!this.embedder) return;
@@ -192,11 +209,20 @@ export class SemanticIndex {
       }
 
       const live = new Set(gotchas.map((gotcha) => gotcha.hash));
-      for (const hash of [...this.vectors.keys()]) if (!live.has(hash)) this.vectors.delete(hash);
+      let pruned = false;
+      for (const hash of [...this.vectors.keys()]) {
+        if (!live.has(hash)) {
+          this.vectors.delete(hash);
+          pruned = true;
+        }
+      }
 
       this.ids = gotchas.map((gotcha) => gotcha.id);
       this.byId = new Map(gotchas.map((gotcha) => [gotcha.id, gotcha.hash]));
-      if (missing.length) this.saveCache();
+      // Persist on removals as well as additions: a deletion-only refresh that skipped the write
+      // left ghost vectors on disk (DEFECTS.md, 2026-09-13), paid for as a warmup embed in the
+      // next session and as a byId/ids disagreement until then.
+      if (missing.length || pruned) this.saveCache();
       this.ready = true;
       this.failure = undefined;
     } catch (error) {

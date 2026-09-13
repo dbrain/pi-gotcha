@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { applyProposals, audit, auditPacket, parseProposals, renderReport, writeIndex } from "./lib/audit.ts";
+import { debugLog } from "./lib/debug.ts";
 import { matching, pathsIn, projectWide } from "./lib/paths.ts";
 import { gate } from "./lib/rank.ts";
 import { byId, createRuntime, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./lib/runtime.ts";
@@ -32,12 +33,30 @@ export default function (pi: any): void {
     return runtime;
   };
 
+  // Every store-scoped command takes an optional leading "user" argument; the default is the
+  // project store, so existing muscle memory and scripts keep working.
+  const storeFor = (active: Runtime, args: string) => {
+    const scope = args.trim().split(/\s+/)[0] === "user" ? "user" : "project";
+    return scope === "user"
+      ? { scope, store: active.userStore, ledger: active.userLedger }
+      : { scope, store: active.store, ledger: active.ledger };
+  };
+
   pi.on("tool_call", (event: any, ctx: any) => {
     const active = ready(ctx);
     if (!active.settings.surface || !active.store.exists()) return;
     const touched = pathsIn(event?.input, active.root);
     if (!touched.length) return;
-    active.surfacer.stage(matching(gotchas(active), touched, active.settings.maxPathSurfacedPerTurn));
+    const matched = matching(gotchas(active), touched, active.settings.maxPathSurfacedPerTurn);
+    if (matched.length) {
+      debugLog("tool_call", {
+        root: active.root,
+        signature: active.store.signature(),
+        touched,
+        matched: matched.map((gotcha) => ({ id: gotcha.id, summary: gotcha.summary.slice(0, 30) })),
+      });
+    }
+    active.surfacer.stage(matched);
   });
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
@@ -75,9 +94,16 @@ export default function (pi: any): void {
 
   pi.on("agent_settled", (_event: unknown, ctx: any) => {
     const active = ready(ctx);
-    const flushed = active.surfacer.flush();
+    // A gotcha can be retired or corrected between staging and delivery (the 2026-09-13 incident
+    // delivered a line for a fact deleted 51 minutes earlier). Re-read the store and re-render
+    // from the current object, so a line is never delivered for a fact that is gone or changed.
+    const live = byId(gotchas(active));
+    const flushed = active.surfacer.flush((id) => live.get(id));
     if (!flushed) return;
     active.ledger.recordSurfaced(flushed.ids);
+    // The last word before the text enters pi core's delivery queue: if this log shows S2 and
+    // the session log shows S1, the substitution happened in pi core, not here.
+    debugLog("deliver", { root: active.root, signature: active.store.signature(), text: flushed.text });
     deliver(pi, flushed.text);
   });
 
@@ -112,8 +138,12 @@ export default function (pi: any): void {
     handler: async (_args: string, ctx: any) => {
       const active = ready(ctx);
       const all = gotchas(active);
+      const userCount = active.userStore.list().length;
       if (!all.length) {
-        ctx.ui.notify(`No gotchas in ${active.store.dir}`, "info");
+        ctx.ui.notify(
+          userCount ? `No project gotchas; ${userCount} in the user store (${active.userStore.dir})` : `No gotchas in ${active.store.dir}`,
+          "info",
+        );
         return;
       }
       const semantic = active.semantic.ready
@@ -123,7 +153,7 @@ export default function (pi: any): void {
       const pending = active.store.proposals().length;
       ctx.ui.notify(
         [
-          `${all.length} gotchas in ${active.store.dir} (${semantic})`,
+          `${all.length} gotchas in ${active.store.dir} (${semantic})${userCount ? `; ${userCount} in the user store` : ""}`,
           ...(pending ? [`${pending} proposed, waiting for /gotchas-proposals`] : []),
           `Recorded today: ${active.ledger.writesToday()} of ${active.ledger.capToday(active.settings.dailyWriteCap)}` +
             (overrides ? ` (${overrides} approved over budget)` : ""),
@@ -135,10 +165,11 @@ export default function (pi: any): void {
   });
 
   pi.registerCommand("gotchas-proposals", {
-    description: "Resolve gotchas proposed by subagents: accept, reject, or replace an existing one",
-    handler: async (_args: string, ctx: any) => {
+    description: "Resolve gotchas proposed by subagents: accept, reject, or replace an existing one (add 'user' for the user store)",
+    handler: async (args: string, ctx: any) => {
       const active = ready(ctx);
-      const proposals = active.store.proposals();
+      const { store, ledger } = storeFor(active, args);
+      const proposals = store.proposals();
       if (!proposals.length) {
         ctx.ui.notify("No proposals pending.", "info");
         return;
@@ -154,18 +185,18 @@ export default function (pi: any): void {
         if (!picked || picked === "Leave for later") break;
 
         if (picked === "Accept") {
-          const accepted = active.store.acceptProposal(proposal.id);
-          if (accepted) active.ledger.recordWrite(accepted.id, false);
+          const accepted = store.acceptProposal(proposal.id);
+          if (accepted) ledger.recordWrite(accepted.id, false);
           done.push(`accepted ${proposal.id}`);
           continue;
         }
         if (picked === "Reject") {
-          active.store.rejectProposal(proposal.id);
+          store.rejectProposal(proposal.id);
           done.push(`rejected ${proposal.id}`);
           continue;
         }
 
-        const existing = gotchas(active);
+        const existing = store.list();
         if (!existing.length) {
           done.push(`nothing to replace for ${proposal.id}`);
           continue;
@@ -176,11 +207,11 @@ export default function (pi: any): void {
         );
         if (!target) continue;
         const targetId = String(target).split(" — ")[0];
-        active.store.retire(targetId);
-        active.ledger.recordRetired(targetId, `replaced by ${proposal.id}`);
-        active.ledger.forget(targetId);
-        active.store.acceptProposal(proposal.id);
-        active.ledger.recordWrite(proposal.id, false);
+        store.retire(targetId);
+        ledger.recordRetired(targetId, `replaced by ${proposal.id}`);
+        ledger.forget(targetId);
+        store.acceptProposal(proposal.id);
+        ledger.recordWrite(proposal.id, false);
         done.push(`${proposal.id} replaced ${targetId}`);
       }
 
@@ -190,27 +221,31 @@ export default function (pi: any): void {
   });
 
   pi.registerCommand("gotchas-index", {
-    description: "Write a browsable index of every gotcha, grouped by what it covers",
-    handler: async (_args: string, ctx: any) => {
+    description: "Write a browsable index of every gotcha, grouped by what it covers (add 'user' for the user store)",
+    handler: async (args: string, ctx: any) => {
       const active = ready(ctx);
-      if (!gotchas(active).length) {
+      const { store, ledger } = storeFor(active, args);
+      if (!store.list().length) {
         ctx.ui.notify("No gotchas to index.", "info");
         return;
       }
-      const written = writeIndex(active.store, active.ledger);
+      const written = writeIndex(store, ledger);
       ctx.ui.notify(`Indexed ${written.count} gotchas to ${written.path}`, "info");
     },
   });
 
   pi.registerCommand("gotchas-budget", {
-    description: "Show or raise today's gotcha write budget",
+    description: "Show or raise today's gotcha write budget (add 'user' for the user store)",
     handler: async (args: string, ctx: any) => {
       const active = ready(ctx);
-      const used = active.ledger.writesToday();
-      const wanted = args.trim();
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const { store, ledger } = storeFor(active, args);
+      const wanted = tokens[0] === "user" ? tokens[1] : tokens[0];
+      const used = ledger.writesToday();
       if (!wanted) {
         ctx.ui.notify(
-          `Recorded ${used} of ${active.ledger.capToday(active.settings.dailyWriteCap)} today. ` +
+          `Recorded ${used} of ${ledger.capToday(active.settings.dailyWriteCap)} today ` +
+            `(store: ${store.dir}). ` +
             "Raise it with /gotchas-budget <n>; updating existing gotchas is always unlimited.",
           "info",
         );
@@ -218,31 +253,33 @@ export default function (pi: any): void {
       }
       const cap = Number(wanted);
       if (!Number.isFinite(cap) || cap < 0) {
-        ctx.ui.notify("Usage: /gotchas-budget <number>", "warning");
+        ctx.ui.notify("Usage: /gotchas-budget [user] <number>", "warning");
         return;
       }
-      active.ledger.raiseToday(Math.floor(cap));
+      ledger.raiseToday(Math.floor(cap));
       ctx.ui.notify(`Today's budget is now ${Math.floor(cap)}; ${used} already recorded.`, "info");
     },
   });
 
   pi.registerCommand("gotchas-review", {
-    description: "Show noisy, stale, duplicated and thin gotchas for human review",
-    handler: async (_args: string, ctx: any) => {
+    description: "Show noisy, stale, duplicated and thin gotchas for human review (add 'user' for the user store)",
+    handler: async (args: string, ctx: any) => {
       const active = ready(ctx);
-      ctx.ui.notify(renderReport(audit(active.store, active.root, active.ledger)), "info");
+      const { store, ledger } = storeFor(active, args);
+      ctx.ui.notify(renderReport(audit(store, active.root, ledger)), "info");
     },
   });
 
   pi.registerCommand("gotchas-audit", {
-    description: "Write an audit packet and ask the agent to review the store with a subagent",
-    handler: async (_args: string, ctx: any) => {
+    description: "Write an audit packet and ask the agent to review the store with a subagent (add 'user' for the user store)",
+    handler: async (args: string, ctx: any) => {
       const active = ready(ctx);
-      if (!gotchas(active).length) {
+      const { store, ledger } = storeFor(active, args);
+      if (!store.list().length) {
         ctx.ui.notify("No gotchas to audit.", "info");
         return;
       }
-      const packet = auditPacket(active.store, active.root, active.ledger);
+      const packet = auditPacket(store, active.root, ledger);
       ctx.ui.notify(`Audit packet written to ${packet.path}`, "info");
       deliver(
         pi,
@@ -258,15 +295,17 @@ export default function (pi: any): void {
   });
 
   pi.registerCommand("gotchas-apply", {
-    description: "Apply retire/merge proposals from an audit packet (defaults to the newest)",
+    description: "Apply retire/merge proposals from an audit packet (defaults to the newest; add 'user' for the user store)",
     handler: async (args: string, ctx: any) => {
       const active = ready(ctx);
-      const target = args.trim();
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const { store, ledger } = storeFor(active, args);
+      const target = tokens[0] === "user" ? tokens[1] : tokens[0];
       const path = target
         ? isAbsolute(target)
           ? target
           : join(active.root, target)
-        : newestPacket(active.store.cacheDir);
+        : newestPacket(store.cacheDir);
       if (!path || !existsSync(path)) {
         ctx.ui.notify(target ? `No such file: ${path}` : "No audit packet found; run /gotchas-audit first.", "warning");
         return;
@@ -281,7 +320,7 @@ export default function (pi: any): void {
         `${proposals.length} proposals from ${path}. Files are deleted; git keeps the history.`,
       );
       if (!confirmed) return;
-      const applied = applyProposals(active.store, proposals, active.ledger);
+      const applied = applyProposals(store, proposals, ledger);
       void refreshSemantic(active);
       ctx.ui.notify(applied.join("\n"), "info");
     },

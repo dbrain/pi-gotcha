@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import register from "../extensions/index.ts";
 import { Ledger } from "../extensions/lib/ledger.ts";
 import { GotchaStore } from "../extensions/lib/store.ts";
 import { cleanup, tempRoot } from "./helpers.ts";
 
 const roots: string[] = [];
+
+// The runtime's default user store follows PI_GOTCHA_USER_DIR; pin it to a temp dir so the
+// wiring tests never read or write the real ~/.config/pi-gotcha.
+const userDir = tempRoot();
+roots.push(userDir);
+before(() => {
+  process.env.PI_GOTCHA_USER_DIR = userDir;
+});
+after(() => {
+  delete process.env.PI_GOTCHA_USER_DIR;
+});
 
 interface FakePi {
   handlers: Map<string, Function[]>;
@@ -237,5 +248,216 @@ describe("extension wiring", () => {
     await pi.tools.get("gotcha").execute("call-1", { action: "read", id }, null, null, ctx);
     await pi.emit("agent_settled", {}, ctx);
     assert.deepEqual(pi.sent, []);
+  });
+});
+
+describe("the 2026-09-13 incident: staging vs deletion", () => {
+  test("a staged line for a deleted gotcha is not delivered", async () => {
+    const pi = fakePi();
+    const { ctx, store } = project();
+    register(pi as any);
+    const id = store.list().find((g) => g.paths.length)!.id;
+    await pi.emit("tool_call", { toolName: "read", input: { path: "src/billing/invoice.ts" } }, ctx);
+    store.retire(id);
+    await pi.emit("agent_settled", {}, ctx);
+    assert.deepEqual(pi.sent, []);
+  });
+
+  test("a flush that drops everything logs the drop", async () => {
+    const pi = fakePi();
+    const { ctx, store, root } = project();
+    const debugPath = join(root, "gotcha-debug.jsonl");
+    const previousFlag = process.env.PI_GOTCHA_DEBUG;
+    const previousFile = process.env.PI_GOTCHA_DEBUG_FILE;
+    process.env.PI_GOTCHA_DEBUG = "1";
+    process.env.PI_GOTCHA_DEBUG_FILE = debugPath;
+    try {
+      register(pi as any);
+      const id = store.list().find((g) => g.paths.length)!.id;
+      await pi.emit("tool_call", { toolName: "read", input: { path: "src/billing/invoice.ts" } }, ctx);
+      store.retire(id);
+      await pi.emit("agent_settled", {}, ctx);
+      const lines = readFileSync(debugPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const flush = lines.find((line) => line.event === "flush");
+      assert.ok(flush, "the drop is logged even though nothing was delivered");
+      assert.deepEqual(flush.delivered, []);
+      assert.deepEqual(flush.dropped, [id]);
+      assert.equal(lines.some((line) => line.event === "deliver"), false, "nothing reaches pi core");
+    } finally {
+      if (previousFlag === undefined) delete process.env.PI_GOTCHA_DEBUG;
+      else process.env.PI_GOTCHA_DEBUG = previousFlag;
+      if (previousFile === undefined) delete process.env.PI_GOTCHA_DEBUG_FILE;
+      else process.env.PI_GOTCHA_DEBUG_FILE = previousFile;
+    }
+  });
+
+  test("a line staged before a correction delivers the corrected text", async () => {
+    const pi = fakePi();
+    const { ctx, store } = project();
+    register(pi as any);
+    const id = store.list().find((g) => g.paths.length)!.id;
+    await pi.emit("tool_call", { toolName: "read", input: { path: "src/billing/invoice.ts" } }, ctx);
+    store.update(id, { summary: "Invoice totals are integer cents; the CSV export drops comma lines (parser patched)" });
+    await pi.emit("agent_settled", {}, ctx);
+    assert.equal(pi.sent.length, 1);
+    assert.match(pi.sent[0], /parser patched/);
+    assert.doesNotMatch(pi.sent[0], /drops any line with a comma/);
+  });
+
+  test("a tool_call match is written to the debug log when PI_GOTCHA_DEBUG is set", async () => {
+    const pi = fakePi();
+    const { ctx, root } = project();
+    const debugPath = join(root, "gotcha-debug.jsonl");
+    const previousFlag = process.env.PI_GOTCHA_DEBUG;
+    const previousFile = process.env.PI_GOTCHA_DEBUG_FILE;
+    process.env.PI_GOTCHA_DEBUG = "1";
+    process.env.PI_GOTCHA_DEBUG_FILE = debugPath;
+    try {
+      register(pi as any);
+      await pi.emit("tool_call", { toolName: "read", input: { path: "src/billing/invoice.ts" } }, ctx);
+      await pi.emit("agent_settled", {}, ctx);
+      const lines = readFileSync(debugPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const byEvent = (event: string) => lines.filter((line) => line.event === event);
+      assert.equal(byEvent("tool_call").length, 1, "the tool_call decision is logged");
+      assert.equal(byEvent("stage").length, 1, "the staging decision is logged");
+      assert.equal(byEvent("flush").length, 1, "the flush decision is logged");
+      assert.equal(byEvent("deliver").length, 1, "the handoff to pi core is logged");
+      for (const line of lines) assert.equal(line.pid, process.pid, "every line carries the pid");
+      const call = byEvent("tool_call")[0];
+      const stage = byEvent("stage")[0];
+      const flush = byEvent("flush")[0];
+      const deliver = byEvent("deliver")[0];
+      assert.equal(call.root, root);
+      assert.deepEqual(call.touched, ["src/billing/invoice.ts"]);
+      assert.equal(call.matched[0].id, stage.staged[0].id);
+      assert.equal(call.signature, stage.signature);
+      assert.deepEqual(flush.delivered, [stage.staged[0].id]);
+      assert.deepEqual(flush.dropped, []);
+      assert.equal(flush.signature, call.signature);
+      assert.equal(deliver.text, flush.text);
+      assert.match(deliver.text, /\[gotcha\]/);
+    } finally {
+      if (previousFlag === undefined) delete process.env.PI_GOTCHA_DEBUG;
+      else process.env.PI_GOTCHA_DEBUG = previousFlag;
+      if (previousFile === undefined) delete process.env.PI_GOTCHA_DEBUG_FILE;
+      else process.env.PI_GOTCHA_DEBUG_FILE = previousFile;
+    }
+  });
+});
+
+describe("user store isolation", () => {
+  test("a user gotcha is never surfaced for a project tool call", async () => {
+    const pi = fakePi();
+    const { ctx } = project();
+    // Same construction as the runtime's default user store: PI_GOTCHA_USER_DIR is the root,
+    // "gotchas" is the dir name inside it.
+    new GotchaStore(userDir, "gotchas").add({ ...BILLING, summary: "User-level billing note that must stay out of prompts" });
+    register(pi as any);
+    await pi.emit("tool_call", { toolName: "read", input: { path: "src/billing/invoice.ts" } }, ctx);
+    await pi.emit("agent_settled", {}, ctx);
+    assert.equal(pi.sent.filter((message) => message.includes("[gotcha]")).length, 1);
+    assert.doesNotMatch(pi.sent.join("\n"), /User-level billing note/);
+  });
+});
+
+describe("store-scoped commands", () => {
+  function userStore() {
+    // Must match the runtime's default user store: PI_GOTCHA_USER_DIR is the root, "gotchas" the dir.
+    return new GotchaStore(userDir, "gotchas");
+  }
+
+  function capturing(root: string, select?: (question: string, options: string[]) => Promise<string | null>) {
+    const notes: string[] = [];
+    const ctx = {
+      cwd: root,
+      ui: {
+        notify: (message: string) => notes.push(String(message)),
+        confirm: async () => true,
+        select: select ?? (async () => null),
+      },
+    };
+    return { notes, ctx };
+  }
+
+  test("/gotchas-review user audits the user store", async () => {
+    const pi = fakePi();
+    const { root } = project();
+    register(pi as any);
+    const user = userStore();
+    const a = user.add({ ...BILLING, summary: "User level billing quirk number one that surprises everyone" });
+    const b = user.add({ ...BILLING, summary: "User level billing quirk number one that surprises everyone much" });
+    const { notes, ctx } = capturing(root);
+    await pi.commands.get("gotchas-review").handler("user", ctx);
+    const report = notes.join("\n");
+    assert.match(report, /near-duplicate pairs/);
+    assert.match(report, new RegExp(a.id));
+    assert.match(report, new RegExp(b.id));
+  });
+
+  test("/gotchas-audit user writes the packet into the user store's cache", async () => {
+    const pi = fakePi();
+    const { root } = project();
+    register(pi as any);
+    userStore().add({ ...BILLING, summary: "User level billing quirk that costs real investigation" });
+    const { notes, ctx } = capturing(root);
+    await pi.commands.get("gotchas-audit").handler("user", ctx);
+    assert.match(notes.join("\n"), /Audit packet written/);
+    const cache = join(userDir, "gotchas", ".cache");
+    const packets = readdirSync(cache).filter((name) => name.startsWith("audit-"));
+    assert.equal(packets.length, 1);
+    assert.match(readFileSync(join(cache, packets[0]), "utf8"), /User level billing quirk/);
+  });
+
+  test("/gotchas-index user indexes the user store", async () => {
+    const pi = fakePi();
+    const { root } = project();
+    register(pi as any);
+    userStore().add({ ...BILLING, summary: "User level billing quirk that costs real investigation" });
+    const { notes, ctx } = capturing(root);
+    await pi.commands.get("gotchas-index").handler("user", ctx);
+    assert.match(notes.join("\n"), /Indexed \d+ gotchas/);
+    assert.match(readFileSync(join(userDir, "gotchas", ".cache", "index.md"), "utf8"), /User level billing quirk/);
+  });
+
+  test("/gotchas-budget user raises only the user store's budget", async () => {
+    const pi = fakePi();
+    const { root } = project();
+    register(pi as any);
+    const { notes, ctx } = capturing(root);
+    await pi.commands.get("gotchas-budget").handler("user 9", ctx);
+    assert.match(notes.join("\n"), /Today's budget is now 9/);
+    notes.length = 0;
+    await pi.commands.get("gotchas-budget").handler("", ctx);
+    assert.match(notes.join("\n"), /Recorded 0 of 5/);
+  });
+
+  test("/gotchas-proposals user accepts a user-store proposal", async () => {
+    const pi = fakePi();
+    const { root } = project();
+    register(pi as any);
+    const user = userStore();
+    const proposed = user.propose({ ...BILLING, summary: "Subagent proposed user level billing fact" });
+    const { notes, ctx } = capturing(root, async () => "Accept");
+    await pi.commands.get("gotchas-proposals").handler("user", ctx);
+    assert.match(notes.join("\n"), new RegExp(`accepted ${proposed.id}`));
+    assert.notEqual(user.get(proposed.id), undefined);
+    assert.equal(user.proposals().length, 0);
+  });
+
+  test("/gotchas-apply user applies a packet from the user store's cache", async () => {
+    const pi = fakePi();
+    const { root } = project();
+    register(pi as any);
+    const user = userStore();
+    const target = user.add({ ...BILLING, summary: "User level billing quirk that costs real investigation" });
+    const packet = join(user.ensureCacheDir(), "audit-test.md");
+    writeFileSync(packet, ["## Proposals", "", `retire ${target.id} — no longer true`, ""].join("\n"));
+    const files = () => readdirSync(user.dir).filter((name) => name.endsWith(".md"));
+    const before = files().length;
+    const { notes, ctx } = capturing(root);
+    await pi.commands.get("gotchas-apply").handler("user", ctx);
+    assert.match(notes.join("\n"), new RegExp(`retired ${target.id}`));
+    assert.equal(files().length, before - 1);
+    assert.equal(existsSync(join(user.dir, `${target.id}.md`)), false);
   });
 });

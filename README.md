@@ -87,6 +87,12 @@ The agent can also search explicitly. `read` is the only channel that returns a 
 
 See [DESIGN.md](DESIGN.md) for how ranking, storage and surfacing actually work, and the build order.
 
+## User-level knowledge
+
+Some surprises don't belong to one project: a language-version trap, a package quirk, a CLI behavior. Those live in a user-level store at `~/.config/pi-gotcha/gotchas` — `PI_GOTCHA_USER_DIR` moves the whole directory — and the tool reaches them with `scope: "user"` on `add`, `update`, `retire` and `list`. `search` and `read` see both stores and mark which one an entry came from, and `add` and `update` refuse to file the same fact in both: general knowledge gets one home, not one per repo. The user store sits outside any repository, so it is not in git and not in code review — it is personal, and if it matters to you, back it up. The store commands take the same leading `user` argument: `/gotchas-review user`, `/gotchas-audit user`, `/gotchas-apply user`, `/gotchas-index user`, `/gotchas-proposals user`, `/gotchas-budget user 20` — without it they operate on the project store.
+
+User gotchas are never auto-surfaced. The path- and prompt-matching channels read the project store only, so that class of content reaches a prompt only when the agent searches for it on purpose. The split came out of the incident in [DEFECTS.md](DEFECTS.md): a retired, already-corrected gotcha was injected into a live session 51 minutes after deletion, and the response was to stop trusting the surfacing path with content that is not project-specific.
+
 ## Measured
 
 `npm run bench` scores retrieval against 30 synthetic gotchas and 45 queries written to attack it (`test/fixtures/corpus.ts`). Results delivered at rank 3, after the relevance floor:

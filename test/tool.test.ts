@@ -471,3 +471,96 @@ describe("other actions", () => {
     assert.match((await runGotchaTool(runtime(), { action: "dance" })).text, /Unknown action/);
   });
 });
+
+describe("user store scope", () => {
+  test("add with scope user saves to the user store, not the project store", async () => {
+    const rt = runtime();
+    const res = await runGotchaTool(rt, { ...ADD, scope: "user" });
+    assert.match(res.text, /^Recorded [a-z0-9-]+\./);
+    assert.match(res.text, /in the user store/);
+    assert.equal(rt.store.list().length, 0);
+    assert.equal(rt.userStore.list().length, 1);
+  });
+
+  test("read resolves a user gotcha without a scope", async () => {
+    const rt = runtime();
+    const added = rt.userStore.add(SAMPLE);
+    const res = await runGotchaTool(rt, { action: "read", id: added.id });
+    assert.match(res.text, /Covers: src\/billing\//);
+  });
+
+  test("retire of a user gotcha without scope is pointed at the user store", async () => {
+    const rt = runtime();
+    const added = rt.userStore.add(SAMPLE);
+    const res = await runGotchaTool(rt, { action: "retire", id: added.id, reason: "outdated" });
+    assert.match(res.text, /in the user store\. Retire it with scope "user"/);
+    assert.equal(rt.userStore.list().length, 1);
+  });
+
+  test("update of a user gotcha without scope is pointed at the user store", async () => {
+    const rt = runtime();
+    const added = rt.userStore.add(SAMPLE);
+    const res = await runGotchaTool(rt, { action: "update", id: added.id, summary: "fixed differently" });
+    assert.match(res.text, /in the user store\. Update it with scope "user"/);
+  });
+
+  test("search finds a user gotcha and marks its store", async () => {
+    const rt = runtime();
+    rt.userStore.add({ ...SAMPLE, summary: "Rust has no adjacent literal concat" });
+    const res = await runGotchaTool(rt, { action: "search", query: "rust string concat" });
+    assert.match(res.text, /Rust has no adjacent literal concat \[src\/billing\/ \+1\] \[user\]/);
+  });
+
+  test("adding the same fact in both stores is refused", async () => {
+    const rt = runtime();
+    rt.userStore.add(SAMPLE);
+    const res = await runGotchaTool(rt, ADD);
+    assert.match(res.text, /already recorded in the user store/);
+    assert.equal(rt.store.list().length, 0);
+  });
+
+  test("adding the same fact twice in the user store is still refused", async () => {
+    const rt = runtime();
+    const first = await runGotchaTool(rt, { ...ADD, scope: "user" });
+    assert.match(first.text, /Recorded/);
+    const second = await runGotchaTool(rt, { ...ADD, scope: "user" });
+    assert.match(second.text, /This looks like/);
+    assert.equal(rt.userStore.list().length, 1);
+  });
+
+  test("an id that exists in both stores is shown once, project entry winning", async () => {
+    const rt = runtime();
+    // Same first six words, so both stores generate the same id, with different content.
+    rt.store.add(SAMPLE);
+    rt.userStore.add({ ...SAMPLE, summary: "Invoice totals are integer cents; the CSV export drops comma lines" });
+    const res = await runGotchaTool(rt, { action: "search", query: "invoice totals export comma" });
+    const matches = res.text.split("\n").filter((line) => line.includes("invoice-totals-are-integer-cents-the"));
+    assert.equal(matches.length, 1, "one line per id across stores");
+    assert.match(matches[0], /drops any line containing a comma/);
+  });
+
+  test("update refuses a summary that duplicates another project gotcha", async () => {
+    const rt = runtime();
+    const a = rt.store.add(SAMPLE);
+    const b = rt.store.add({ ...SAMPLE, summary: "Session cookies are dropped on redirect unless SameSite is set to none explicitly" });
+    const res = await runGotchaTool(rt, { action: "update", id: b.id, summary: SAMPLE.summary });
+    assert.match(res.text, new RegExp(`near-copy of ${a.id}`));
+    assert.match(res.text, /\(project store\)/);
+  });
+
+  test("update refuses a summary that duplicates a user gotcha", async () => {
+    const rt = runtime();
+    const b = rt.store.add({ ...SAMPLE, summary: "Session cookies are dropped on redirect unless SameSite is set to none explicitly" });
+    rt.userStore.add(SAMPLE);
+    const res = await runGotchaTool(rt, { action: "update", id: b.id, summary: SAMPLE.summary });
+    assert.match(res.text, /near-copy of .* \(user store\)/);
+  });
+
+  test("an update that does not touch summary or aliases skips the duplicate check", async () => {
+    const rt = runtime();
+    rt.store.add(SAMPLE);
+    const b = rt.store.add({ ...SAMPLE, summary: "Session cookies are dropped on redirect unless SameSite is set to none explicitly" });
+    const res = await runGotchaTool(rt, { action: "update", id: b.id, body: "More detail that costs real investigation." });
+    assert.match(res.text, /^Updated/);
+  });
+});

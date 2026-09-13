@@ -29,7 +29,8 @@ export function seededStore(root: string, drafts: GotchaDraft[]): GotchaStore {
 }
 
 export function runtimeFor(root: string, overrides: Partial<Settings> = {}): Runtime {
-  return createRuntime(root, settingsFor(overrides));
+  // The user store lives under the test root, so tests never touch the real ~/.config.
+  return createRuntime(root, settingsFor(overrides), new GotchaStore(join(root, "user-home"), "gotchas"));
 }
 
 export const SAMPLE: GotchaDraft = {

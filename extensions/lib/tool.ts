@@ -1,13 +1,23 @@
-import { prune } from "./rank.ts";
-import { byId, gotchas, hybridSearch, refreshSemantic, type Runtime } from "./runtime.ts";
+import { isAbsolute, relative } from "node:path";
+import { byId, gotchas, hybridSearch, hybridUserSearch, refreshSemantic, searchAll, userGotchas, type Runtime } from "./runtime.ts";
 import { scopeOf } from "./surfacing.ts";
 import { jaccard, tokens } from "./text.ts";
 import { MAX_SUMMARY, type Gotcha, type GotchaDraft } from "./store.ts";
+import type { GotchaStore } from "./store.ts";
+import type { Ledger } from "./ledger.ts";
 
 export const TOOL_PARAMETERS = {
   type: "object",
   properties: {
     action: { type: "string", enum: ["search", "read", "add", "update", "retire", "list"] },
+    scope: {
+      type: "string",
+      enum: ["project", "user"],
+      description:
+        "add, update, retire, read, list: which store. 'user' is cross-project knowledge kept " +
+        "outside the repo; it is never auto-surfaced and is reached only by search, read or list. " +
+        "Defaults to 'project'.",
+    },
     query: { type: "string", description: "search: what you want to know, in your own words." },
     id: { type: "string", description: "read, update, retire: the gotcha id." },
     summary: {
@@ -72,6 +82,9 @@ export const TOOL_DESCRIPTION =
   '"getUser returns null when the id is unknown" (the code says so). ' +
   "If the knowledge belongs at one line of code, write a comment there instead. " +
   "Prefer update over add: a near-duplicate is refused, and updating costs nothing." +
+  "\n\nGeneral knowledge that is not about this repo — a language feature, a tool, an environment — " +
+  "belongs in the user store (scope: 'user'): it is kept outside the repo, is never auto-surfaced, " +
+  "and is reached only by search, read or list. Project gotchas are for this repo only." +
   "\n\nadd requires ALL of: summary, expected, actual, trigger, and at least two aliases. " +
   "An add missing `actual` is refused and the knowledge is lost, so write both halves of the " +
   "evidence pair before you call.";
@@ -96,13 +109,36 @@ const NOT_A_GOTCHA: Array<{ pattern: RegExp; why: string }> = [
   },
 ];
 
-function describe(gotcha: Gotcha): string {
-  const scope = gotcha.paths.length ? scopeOf(gotcha) : "project-wide";
-  return `${gotcha.id} — ${gotcha.summary} [${scope}]`;
+function describe(gotcha: Gotcha, store: "project" | "user" = "project"): string {
+  const pathScope = gotcha.paths.length ? scopeOf(gotcha) : store === "user" ? "user-wide" : "project-wide";
+  return store === "user"
+    ? `${gotcha.id} — ${gotcha.summary} [${pathScope}] [user]`
+    : `${gotcha.id} — ${gotcha.summary} [${pathScope}]`;
 }
 
-async function findDuplicate(runtime: Runtime, summary: string, aliases: string[]): Promise<Gotcha | null> {
-  const all = gotchas(runtime);
+// Which store a parsed gotcha belongs to, by where its file lives.
+function storeOf(runtime: Runtime, gotcha: Gotcha): "project" | "user" {
+  const rel = relative(runtime.userStore.dir, gotcha.file);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel) ? "user" : "project";
+}
+
+function storeScope(params: Record<string, unknown>): "project" | "user" {
+  return params.scope === "user" ? "user" : "project";
+}
+
+function channel(runtime: Runtime, scope: "project" | "user"): { store: GotchaStore; ledger: Ledger } {
+  return scope === "user"
+    ? { store: runtime.userStore, ledger: runtime.userLedger }
+    : { store: runtime.store, ledger: runtime.ledger };
+}
+
+async function findDuplicate(
+  runtime: Runtime,
+  summary: string,
+  aliases: string[],
+  scope: "project" | "user",
+): Promise<Gotcha | null> {
+  const all = scope === "user" ? userGotchas(runtime) : gotchas(runtime);
   if (!all.length) return null;
   const probe = [summary, aliases.join(" ")].join(" ");
   const index = byId(all);
@@ -113,24 +149,43 @@ async function findDuplicate(runtime: Runtime, summary: string, aliases: string[
     }
   }
 
-  const ranked = await hybridSearch(runtime, probe, 3);
+  const ranked =
+    scope === "user" ? await hybridUserSearch(runtime, probe, 3) : await hybridSearch(runtime, probe, 3);
   const top = ranked[0];
   if (top && (top.semantic ?? 0) >= runtime.settings.duplicateThreshold) return index.get(top.id) ?? null;
   return null;
 }
 
+// The same fact in the other store is still a duplicate: general knowledge belongs in one place,
+// not in every repo. A cheap keyword pass is enough; the stores are small.
+function crossStoreDuplicate(
+  runtime: Runtime,
+  summary: string,
+  aliases: string[],
+  scope: "project" | "user",
+): Gotcha | null {
+  const other = scope === "user" ? gotchas(runtime) : userGotchas(runtime);
+  const probe = [summary, aliases.join(" ")].join(" ");
+  return (
+    other.find(
+      (gotcha) => jaccard(probe, `${gotcha.summary} ${gotcha.aliases.join(" ")}`) >= runtime.settings.duplicateOverlap,
+    ) ?? null
+  );
+}
+
 // Today's writes first, because the most likely thing to drop is something recorded in the same
 // burst of work; then whatever else the store says is closest to the new one.
-async function replaceCandidates(runtime: Runtime, probe: string): Promise<Gotcha[]> {
-  const all = gotchas(runtime);
+async function replaceCandidates(runtime: Runtime, probe: string, scope: "project" | "user"): Promise<Gotcha[]> {
+  const all = scope === "user" ? userGotchas(runtime) : gotchas(runtime);
   const index = byId(all);
-  const today = runtime.ledger
+  const ledger = scope === "user" ? runtime.userLedger : runtime.ledger;
+  const today = ledger
     .writtenToday()
     .map((id) => index.get(id))
     .filter((gotcha): gotcha is Gotcha => Boolean(gotcha));
 
   const seen = new Set(today.map((gotcha) => gotcha.id));
-  const ranked = (await hybridSearch(runtime, probe, 8))
+  const ranked = (scope === "user" ? await hybridUserSearch(runtime, probe, 8) : await hybridSearch(runtime, probe, 8))
     .map((entry) => index.get(entry.id))
     .filter((gotcha): gotcha is Gotcha => Boolean(gotcha) && !seen.has(gotcha.id));
 
@@ -163,27 +218,44 @@ export async function runGotchaTool(
   context: ToolContext = {},
 ): Promise<ToolResult> {
   const action = String(params.action ?? "");
-  const { store, ledger, settings } = runtime;
+  const { settings } = runtime;
 
   if (action === "search") {
     const query = String(params.query ?? "").trim();
     if (!query) return { text: "search needs a query." };
     const limit = Number(params.limit) > 0 ? Number(params.limit) : 5;
-    const ranked = prune(await hybridSearch(runtime, query, limit), settings.searchVeto);
+    const ranked = await searchAll(runtime, query, limit);
     if (!ranked.length) return { text: "No gotchas recorded for that." };
-    const index = byId(gotchas(runtime));
-    const lines = ranked
-      .map((entry) => index.get(entry.id))
-      .filter((gotcha): gotcha is Gotcha => Boolean(gotcha))
-      .map((gotcha) => describe(gotcha));
-    const note = runtime.semantic.ready ? "" : "\n(meaning-based search unavailable; keyword results only)";
+    // Project entries win an id collision; user entries are marked so the answer is unambiguous.
+    const projectIds = new Set(gotchas(runtime).map((gotcha) => gotcha.id));
+    const index = byId([...userGotchas(runtime), ...gotchas(runtime)]);
+    // Ids are slugs generated per store, so the same id can exist in both stores and rank twice;
+    // one line per id, project entry winning.
+    const lines: string[] = [];
+    const shown = new Set<string>();
+    for (const entry of ranked) {
+      if (shown.has(entry.id)) continue;
+      const gotcha = index.get(entry.id);
+      if (!gotcha) continue;
+      shown.add(entry.id);
+      lines.push(describe(gotcha, projectIds.has(gotcha.id) ? "project" : "user"));
+    }
+    const note =
+      runtime.semantic.ready || runtime.userSemantic.ready
+        ? ""
+        : "\n(meaning-based search unavailable; keyword results only)";
     return { text: `${lines.join("\n")}\n\nRead one with action "read".${note}` };
   }
 
   if (action === "read") {
     const id = String(params.id ?? "").trim();
-    const gotcha = store.get(id);
+    const scope = storeScope(params);
+    const primary = scope === "user" ? runtime.userStore : runtime.store;
+    const fallback = scope === "user" ? runtime.store : runtime.userStore;
+    // Reading is read-only, so an id that lives in the other store is resolved, not bounced.
+    const gotcha = primary.get(id) ?? fallback.get(id);
     if (!gotcha) return { text: `No gotcha with id ${id}.` };
+    const ledger = storeOf(runtime, gotcha) === "user" ? runtime.userLedger : runtime.ledger;
 
     const asked = Number(params.offset);
     const offset = Number.isFinite(asked) && asked > 0 ? Math.floor(asked) : 0;
@@ -199,14 +271,18 @@ export async function runGotchaTool(
 
     if (offset > 0) return { text: `# ${gotcha.id} (from ${offset})\n\n${slice}${more}` };
 
-    const scope = gotcha.paths.length ? gotcha.paths.join(", ") : "project-wide";
+    const covers = gotcha.paths.length
+      ? gotcha.paths.join(", ")
+      : storeOf(runtime, gotcha) === "user"
+        ? "user-wide"
+        : "project-wide";
     return {
       text:
         [
           `# ${gotcha.id}`,
           gotcha.summary,
           ``,
-          `Covers: ${scope}`,
+          `Covers: ${covers}`,
           gotcha.trigger ? `Comes up when: ${gotcha.trigger}` : "",
           gotcha.aliases.length ? `Also known as: ${gotcha.aliases.join(", ")}` : "",
           `Expected: ${gotcha.expected}`,
@@ -221,10 +297,11 @@ export async function runGotchaTool(
   }
 
   if (action === "list") {
-    const all = gotchas(runtime);
-    if (!all.length) return { text: "No gotchas recorded yet." };
+    const scope = storeScope(params);
+    const all = scope === "user" ? userGotchas(runtime) : gotchas(runtime);
+    if (!all.length) return { text: `No ${scope} gotchas recorded yet.` };
     const limit = Number(params.limit) > 0 ? Number(params.limit) : settings.listLimit;
-    const shown = all.slice(0, limit).map(describe).join("\n");
+    const shown = all.slice(0, limit).map((gotcha) => describe(gotcha, scope)).join("\n");
     const rest = all.length - Math.min(limit, all.length);
     return { text: rest > 0 ? `${shown}\n…and ${rest} more; use search to find them.` : shown };
   }
@@ -286,12 +363,27 @@ export async function runGotchaTool(
       };
     }
 
-    const duplicate = await findDuplicate(runtime, summary, aliases);
+    const scope = storeScope(params);
+    const { store, ledger } = channel(runtime, scope);
+
+    const duplicate = await findDuplicate(runtime, summary, aliases, scope);
     if (duplicate) {
+      const where = storeOf(runtime, duplicate);
       return {
         text:
-          `This looks like ${duplicate.id}: "${duplicate.summary}". ` +
-          `Update that one (action "update", id "${duplicate.id}") rather than adding a near-copy.`,
+          `This looks like ${duplicate.id} (${where} store): "${duplicate.summary}". ` +
+          `Update that one (action "update", id "${duplicate.id}"${where === "user" ? ', scope "user"' : ""}) ` +
+          "rather than adding a near-copy.",
+      };
+    }
+    const cross = crossStoreDuplicate(runtime, summary, aliases, scope);
+    if (cross) {
+      const other = scope === "user" ? "project" : "user";
+      return {
+        text:
+          `This is already recorded in the ${other} store as ${cross.id}: "${cross.summary}". ` +
+          `Update that one (action "update", id "${cross.id}", scope "${other}") if it needs correcting; ` +
+          "general knowledge belongs in one place, not in every repo.",
       };
     }
 
@@ -323,7 +415,7 @@ export async function runGotchaTool(
       if (picked === null || picked === "skip") return { text: "Not recorded; the user skipped it." };
 
       if (picked === "replace") {
-        const candidates = await replaceCandidates(runtime, `${summary} ${aliases.join(" ")}`);
+        const candidates = await replaceCandidates(runtime, `${summary} ${aliases.join(" ")}`, scope);
         if (!candidates.length) return { text: "Nothing to replace; not recorded." };
         const todayIds = new Set(ledger.writtenToday());
         const chosen = await context.choose(
@@ -363,14 +455,23 @@ export async function runGotchaTool(
     const remaining = Math.max(0, cap - ledger.writesToday());
     return {
       text:
-        `Recorded ${created.id}. ${remaining} more can be recorded today; updating existing ` +
-        "gotchas is unlimited.",
+        `Recorded ${created.id}. It is in the ${scope} store. ${remaining} more can be recorded today; ` +
+        "updating existing gotchas is unlimited.",
     };
   }
 
   if (action === "update") {
     const id = String(params.id ?? "").trim();
-    if (!store.get(id)) return { text: `No gotcha with id ${id}.` };
+    const scope = storeScope(params);
+    const { store } = channel(runtime, scope);
+    if (!store.get(id)) {
+      const other = scope === "user" ? runtime.store : runtime.userStore;
+      if (other.get(id)) {
+        const otherScope = scope === "user" ? "project" : "user";
+        return { text: `No ${scope} gotcha with id ${id} — it is in the ${otherScope} store. Update it with scope "${otherScope}".` };
+      }
+      return { text: `No gotcha with id ${id}.` };
+    }
     const patch: Record<string, unknown> = {};
     if (typeof params.summary === "string") patch.summary = params.summary;
     if (typeof params.expected === "string") patch.expected = params.expected;
@@ -390,6 +491,31 @@ export async function runGotchaTool(
       const junk = refuseJunk(patch.summary);
       if (junk) return { text: junk };
     }
+    // An update is the other door duplicates walk through: a new summary can re-file a fact that
+    // already exists in this store or the other one.
+    if (typeof patch.summary === "string" || Array.isArray(patch.aliases)) {
+      const current = store.get(id)!;
+      const summary = typeof patch.summary === "string" ? patch.summary : current.summary;
+      const aliases = Array.isArray(patch.aliases) ? (patch.aliases as string[]) : current.aliases;
+      const probe = [summary, aliases.join(" ")].join(" ");
+      const same = store
+        .list()
+        .filter((gotcha) => gotcha.id !== id)
+        .find(
+          (gotcha) =>
+            jaccard(probe, `${gotcha.summary} ${gotcha.aliases.join(" ")}`) >= settings.duplicateOverlap,
+        );
+      const cross = crossStoreDuplicate(runtime, summary, aliases, scope);
+      const found = same ?? cross;
+      if (found) {
+        const where = same ? scope : scope === "user" ? "project" : "user";
+        return {
+          text:
+            `The new summary is a near-copy of ${found.id} (${where} store): "${found.summary}". ` +
+            `That would file the same fact twice; if you are consolidating, retire the other one first.`,
+        };
+      }
+    }
     const updated = store.update(id, patch);
     void refreshSemantic(runtime);
     return { text: updated ? `Updated ${updated.id}.` : `Could not update ${id}.` };
@@ -399,12 +525,26 @@ export async function runGotchaTool(
     const id = String(params.id ?? "").trim();
     const reason = String(params.reason ?? "").trim();
     if (!reason) return { text: "retire needs a reason." };
-    if (!store.get(id)) return { text: `No gotcha with id ${id}.` };
+    const scope = storeScope(params);
+    const { store, ledger } = channel(runtime, scope);
+    if (!store.get(id)) {
+      const other = scope === "user" ? runtime.store : runtime.userStore;
+      if (other.get(id)) {
+        const otherScope = scope === "user" ? "project" : "user";
+        return { text: `No ${scope} gotcha with id ${id} — it is in the ${otherScope} store. Retire it with scope "${otherScope}".` };
+      }
+      return { text: `No gotcha with id ${id}.` };
+    }
     store.retire(id);
     ledger.recordRetired(id, reason);
     ledger.forget(id);
     void refreshSemantic(runtime);
-    return { text: `Retired ${id}. The reason is logged and git keeps the file history.` };
+    return {
+      text:
+        scope === "user"
+          ? `Retired ${id} from the user store.`
+          : `Retired ${id}. The reason is logged and git keeps the file history.`,
+    };
   }
 
   return { text: `Unknown action "${action}".` };

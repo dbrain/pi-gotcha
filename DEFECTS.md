@@ -1,0 +1,39 @@
+# Defects
+
+## 2026-09-13 — Retired gotcha injected 51 min after deletion, with pre-update text
+
+**Incident.** Session `01a098b0` (2026-09-13, cwd `/home/dbrain/dev/tinyfiddler/kob`), all times UTC:
+
+| time | event |
+|---|---|
+| 03:57:47 | `gotcha add` created `rustc-1-98-no-longer-accepts`, paths `["koblibs/kob-ebook/"]`, summary S1: *"rustc 1.98 no longer accepts adjacent string-literal concatenation…"* |
+| 04:02:43 | `gotcha update` rewrote the summary to S2 (*"Rust does not concatenate adjacent string literals — my mistake…"*) |
+| 04:03:30 | `gotcha retire` deleted the file; retired.log entry written |
+| 04:53:22 | `ledger.json` written — the **only** `recordSurfaced` for this id (`surfaced: 1`) |
+| 04:55:05 | user's next message delivered with a `pi-gotcha` custom_message containing the **S1** summary verbatim — the pre-update, pre-retire snapshot |
+
+The user saw a `[gotcha]` line injected into their prompt for a fact that was (a) already corrected and (b) already deleted, triggered by file touches under `koblibs/kob-ebook/` — a file about to be written/edited counted as a "new file" by `pathsIn`, which is the designed path-matching trigger. The report itself was the silly part: a retired, factually-wrong gotcha, surfaced automatically.
+
+**Verified during investigation:**
+
+1. The store is clean now: no `.md` in `kob/.gotchas/`, retire recorded in `retired.log`.
+2. **The store code is not the source.** Driving the real `store.ts` through add → list → update → list → retire → list returns fresh data after every mutation (`list()` re-reads the directory and re-signs by mtime/size on each call; signature change defeats the `listCache`). Reproduced against the checked-out code; all fresh.
+3. **Running code == checkout.** The pi process (PID 865968) started 02:55:21Z, exactly at session start; every extension commit predates it; there is exactly one copy of the code on disk (`~/.pi/agent/git/github.com/dbrain/pi-gotcha`, identical to this repo). ext4 — no filesystem-level stale reads.
+4. **The flush happened at 04:53:22, not earlier.** `recordSurfaced` persists immediately, and the ledger mtime is 04:53:22 with `surfaced: 1`. So the S1 line was staged between 04:03:30 and 04:53:22 and flushed at the end of that turn (`agent_settled` → `flush()` → `recordSurfaced` → `deliver`). The `deliverAs: "nextTurn"` queue (`_pendingNextTurnMessages`, consumed when the next user prompt arrives) explains the 04:53:22 → 04:55:05 gap, not an earlier flush.
+5. **Only one delivery in the whole session** (one `custom_message` in the session log) and **no subagents** ran, so no second process/store is involved.
+6. The gotcha had paths, so it was excluded from the project-wide `before_agent_start` path — only the `tool_call` path-matching surfacer could have staged it.
+
+**Unresolved — the core question.** Between 04:03:30 and 04:53:22, some `tool_call` handler called `matching(gotchas(active), touched)` and obtained a `Gotcha` object with the S1 summary, then `surfacer.stage()` rendered it into the line delivered at 04:55:05. But `gotchas()` → `store.list()` re-reads the directory on every call, and the file had been unlinked at 04:03:30. With the checked-out code, that object cannot be produced — every static path ends in a contradiction. Something in the live process state differs from the checkout in a way I could not observe from outside (event replay in pi core, an unmodelled second runtime/instance, or a delivery artifact). Needs live instrumentation: log in `tool_call`/`stage()` with (timestamp, root, signature, gotcha ids, summary prefix) and reproduce.
+
+**Confirmed secondary bug (separate, reproducible by reading code) — FIXED:** `embeddings.ts` — `refresh()` only persisted when `missing.length` was non-zero, so a deletion-only refresh pruned the in-memory index but never rewrote `embeddings.json`. Evidence: `kob/.gotchas/.cache/embeddings.json` mtime is 04:02:43 (the update), the 04:03:30 retire did not rewrite it, and the cache still holds one vector for the deleted gotcha. A later session therefore paid a warmup embed for a ghost and its `byId`/`ids` could disagree with the store until the next content change. Fix: `refresh()` now rewrites the cache whenever the vector set changed (including prune-only), skips the rewrite when nothing changed, and skips resolving the embedder entirely for an empty store with nothing cached. Covered by `test/embeddings.test.ts` (a fake local endpoint exercises the real remote path).
+
+**Anomaly worth a glance:** the single cached vector's key (`a18faebd8b8b95a9…`) matches neither the add nor the update content hash recomputed with `hashOf`'s formula (`summary aliases… body`) — either the hash input differed from the tool args after the YAML round-trip, or the cache holds a vector from a third content state.
+
+**Design decision (owner, 2026-09-13):** general language-feature knowledge (e.g. "Rust has no adjacent string-literal concatenation") is not project gotcha material at all — it belongs, if anywhere, in a **user-level** gotcha dir. And it should **not be auto-injected**: the path-matching surfer must not push this class of content into a user's prompt unasked. The store already refuses some junk; this incident is the argument for keeping "my training was wrong" out of the surfacing path entirely.
+
+**Status (after the fix, 2026-09-13):**
+
+1. **The symptom is killed regardless of the cause.** `agent_settled` no longer delivers the staged snapshot. It re-reads the project store and re-renders each staged line from the *current* object: a gotcha that was retired or corrected between staging and delivery is either dropped or delivered with its current text. Regression tests in `test/extension.test.ts` ("the 2026-09-13 incident") cover both. Whatever the live process was holding onto, a stale object can no longer reach a prompt — delivery is the last gate, and it now consults the store.
+2. **Instrumentation is in for the cause.** `PI_GOTCHA_DEBUG=1` (+ `PI_GOTCHA_DEBUG_FILE=path`) appends one JSON line per checkpoint with timestamp, resolved root, store signature, and pid: `tool_call` (touched paths, matched ids), `stage` (staged ids/summary prefixes), `flush` (delivered ids, **dropped ids**, the rendered text — a flush that drops everything gets a line too, which is the incident's exact shape), and `deliver` (the exact text handed to pi core's queue). One live run of the kob scenario shows exactly what the running process saw across the whole 04:03:30 → 04:55:05 window; if the log shows S2 and the session log shows S1, the substitution happened in pi core. It is temporary; remove `extensions/lib/debug.ts` and its call sites once the incident is explained.
+3. **The design decision is implemented.** A user-level store lives at `~/.config/pi-gotcha/gotchas` (override the whole dir with `PI_GOTCHA_USER_DIR`); tool actions take `scope: "user"`; `add` and `update` refuse near-duplicates across stores (general knowledge gets one home, not one per repo); and user gotchas are reachable only by `search`/`read` — the path-matching and prompt-matching surfacers read the project store only, so this class of content is never auto-injected. Tests: `test/tool.test.ts` ("user store scope"), `test/extension.test.ts` ("user store isolation").
+4. **The store commands reach the user store.** `/gotchas-review`, `/gotchas-audit`, `/gotchas-apply`, `/gotchas-index`, `/gotchas-proposals` and `/gotchas-budget` all take a leading `user` argument and operate on the user store and its own ledger; without it they keep their project-store behavior. `update` runs the same near-duplicate guard as `add` — within its own store (excluding the target) and across stores — so a corrected summary cannot re-file a fact that already lives somewhere else. Tests: `test/extension.test.ts` ("store-scoped commands"), `test/tool.test.ts` (update duplicate refusals).
